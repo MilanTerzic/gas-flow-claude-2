@@ -88,6 +88,57 @@ def _one_row_per_date(df: pd.DataFrame) -> pd.DataFrame:
     return out.groupby("date", as_index=False).last()
 
 
+def _apply_current_day_flow_estimate(
+    flow_aligned: pd.DataFrame,
+    today_ts: pd.Timestamp,
+    flow_columns: Sequence[str],
+) -> pd.DataFrame:
+    """
+    Current-day ENTSOG daily data may be incomplete during the gas day.
+
+    If today's flow is missing, or is zero while yesterday had a positive
+    value, temporarily use yesterday's actual value for today only. Future
+    forecast days are deliberately left untouched.
+    """
+    out = flow_aligned.copy()
+    out["is_current_day_estimate"] = False
+    out["current_day_estimated_components"] = ""
+
+    if today_ts not in out.index:
+        return out
+
+    yesterday = today_ts - pd.Timedelta(days=1)
+    if yesterday not in out.index:
+        return out
+
+    estimated_components: list[str] = []
+    for col in flow_columns:
+        if col not in out.columns:
+            continue
+
+        today_value = out.at[today_ts, col]
+        yesterday_value = out.at[yesterday, col]
+        yesterday_is_usable = pd.notna(yesterday_value) and float(yesterday_value) > 0.0
+        today_is_missing = pd.isna(today_value)
+        today_is_artificial_zero = (
+            pd.notna(today_value)
+            and float(today_value) == 0.0
+            and yesterday_is_usable
+        )
+
+        if yesterday_is_usable and (today_is_missing or today_is_artificial_zero):
+            out.at[today_ts, col] = yesterday_value
+            estimated_components.append(col)
+
+    if estimated_components:
+        out.at[today_ts, "is_current_day_estimate"] = True
+        out.at[today_ts, "current_day_estimated_components"] = ", ".join(
+            estimated_components
+        )
+
+    return out
+
+
 def build_balance(
     date_index: pd.DatetimeIndex,
     today_ts: pd.Timestamp,
@@ -142,7 +193,19 @@ def build_balance(
     df["required_forecast_mcm"] = np.where(is_forecast, demand, np.nan)
 
     # ---- Flows (already in mcm/day from the flows module) ------------------
-    flow_aligned = flow_df.set_index("date").reindex(date_index).fillna(0.0)
+    flow_columns = ["kireevo", "kiskundorozsma_2", "kalotina", "kiskundorozsma_hu"]
+    flow_aligned = flow_df.set_index("date").reindex(date_index)
+    flow_aligned = _apply_current_day_flow_estimate(
+        flow_aligned=flow_aligned,
+        today_ts=today_ts,
+        flow_columns=flow_columns,
+    )
+    estimate_flags = flow_aligned[
+        ["is_current_day_estimate", "current_day_estimated_components"]
+    ].copy()
+    flow_aligned = flow_aligned.drop(
+        columns=["is_current_day_estimate", "current_day_estimated_components"]
+    ).fillna(0.0)
     kkd_hu = flow_aligned.get("kiskundorozsma_hu", pd.Series(0.0, index=date_index))
     kireevo = flow_aligned.get("kireevo", pd.Series(0.0, index=date_index))
     kkd_2 = flow_aligned.get("kiskundorozsma_2", pd.Series(0.0, index=date_index))
@@ -163,6 +226,10 @@ def build_balance(
         df["imports_from_bulgaria_mcm"] - df["bosnia_consumption_mcm"]
     ).clip(lower=0.0)
     df["domestic_production_mcm"] = float(domestic_production)
+    df["is_current_day_estimate"] = estimate_flags["is_current_day_estimate"].values
+    df["current_day_estimated_components"] = estimate_flags[
+        "current_day_estimated_components"
+    ].values
 
     df["serbian_supply_before_bosnia_mcm"] = (
         df["imports_from_bulgaria_mcm"]
@@ -233,14 +300,18 @@ def validate_balance_for_plot(
 
     around_today = check[
         check["date"].between(
-            today_ts - pd.Timedelta(days=lookaround_days),
+            today_ts - pd.Timedelta(days=max(lookaround_days, 1)),
             today_ts + pd.Timedelta(days=lookaround_days),
         )
+    ].copy()
+    current_day_estimates = check[
+        check.get("is_current_day_estimate", False) == True  # noqa: E712
     ].copy()
 
     return {
         "components": components,
         "around_today": around_today,
+        "current_day_estimates": current_day_estimates,
         "duplicate_dates": duplicate_dates,
         "hist_fcst_overlap": hist_fcst_overlap,
         "high_totals": high_totals,

@@ -282,6 +282,11 @@ with tab_balance:
         f"{kpi_row['bosnia_consumption_mcm']:,.2f} mcm/d",
         delta=f"{bih_pct_percent:.1f}% of BG import",
     )
+    if bool(kpi_row.get("is_current_day_estimate", False)):
+        st.caption(
+            "Today uses previous-day ENTSOG values for: "
+            f"{kpi_row['current_day_estimated_components']}."
+        )
 
     st.markdown("")  # small gap
 
@@ -304,6 +309,8 @@ with tab_balance:
                 "storage_injection_mcm",
                 "storage_withdrawal_mcm",
                 "storage_imbalance_mcm",
+                "is_current_day_estimate",
+                "current_day_estimated_components",
                 "required_actual_mcm",
                 "required_forecast_mcm",
                 "is_forecast",
@@ -316,6 +323,7 @@ with tab_balance:
             duplicate_dates = balance_validation["duplicate_dates"]
             hist_fcst_overlap = balance_validation["hist_fcst_overlap"]
             high_totals = balance_validation["high_totals"]
+            current_day_estimates = balance_validation["current_day_estimates"]
             threshold = balance_validation["high_total_threshold"]
 
             if duplicate_dates.empty and hist_fcst_overlap.empty:
@@ -338,6 +346,11 @@ with tab_balance:
                 high_display = high_totals[validation_cols].copy()
                 high_display["date"] = high_display["date"].dt.strftime("%Y-%m-%d")
                 st.dataframe(high_display, use_container_width=True, hide_index=True)
+            if not current_day_estimates.empty:
+                st.info("Current-day ENTSOG estimate applied.")
+                estimate_display = current_day_estimates[validation_cols].copy()
+                estimate_display["date"] = estimate_display["date"].dt.strftime("%Y-%m-%d")
+                st.dataframe(estimate_display, use_container_width=True, hide_index=True)
 
     # ---- Three compact, vertically-aligned charts -------------------------
     st.markdown("### Daily composition of Serbia demand")
@@ -380,6 +393,8 @@ with tab_balance:
             "storage_imbalance_mcm",
             "unserved_deficit_after_storage_limit_mcm",
             "uncaptured_surplus_after_storage_limit_mcm",
+            "is_current_day_estimate",
+            "current_day_estimated_components",
             "is_forecast",
         ]
         display = balance[show_cols].copy()
