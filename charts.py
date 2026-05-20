@@ -1,0 +1,501 @@
+"""
+Pure plotting functions.
+
+Each function takes a fully-prepared DataFrame plus a ``today`` timestamp and
+returns a configured ``plotly.graph_objects.Figure``. No data fetching, no
+calculation, no Streamlit calls — easy to unit-test and easy to reuse.
+
+Style targets
+-------------
+* white background (no dark theme), plotly_white template
+* compact heights (330–380 / 170–220 / 200–240 px)
+* uniform margins  margin=dict(l=50, r=20, t=40, b=35)
+* light grey gridlines  rgba(220,220,220,0.7)
+* horizontal legend above the plot
+* narrow red "today" vrect spanning exactly one day, identical on every chart
+"""
+
+from __future__ import annotations
+
+from typing import List, Tuple
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+from config import (
+    COLOR_BG_IMPORT,
+    COLOR_DEMAND,
+    COLOR_HU_MET,
+    COLOR_HU_OTHERS,
+    COLOR_KALOTINA,
+    COLOR_PRODUCTION,
+    COLOR_STORAGE_NEG,
+    COLOR_STORAGE_POS,
+    COLOR_TEMP,
+    COLOR_TODAY,
+    GRID_COLOR,
+)
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+DEFAULT_MARGIN = dict(l=50, r=20, t=40, b=35)
+
+
+def _today_band(fig: go.Figure, today: pd.Timestamp) -> None:
+    """Add a narrow, semi-transparent red band covering exactly one day."""
+    fig.add_vrect(
+        x0=today - pd.Timedelta(hours=12),
+        x1=today + pd.Timedelta(hours=12),
+        fillcolor=COLOR_TODAY,
+        opacity=0.15,
+        line_width=1,
+        line_color=COLOR_TODAY,
+        layer="below",
+    )
+
+
+def _apply_common_layout(
+    fig: go.Figure,
+    title: str,
+    y_title: str,
+    height: int,
+    show_legend: bool = True,
+) -> None:
+    fig.update_layout(
+        title=dict(text=title, x=0.0, xanchor="left", font=dict(size=14)),
+        template="plotly_white",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        height=height,
+        margin=DEFAULT_MARGIN,
+        showlegend=show_legend,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0.0,
+            font=dict(size=10),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        bargap=0.15,
+        hovermode="x unified",
+    )
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor=GRID_COLOR,
+        tickformat="%b %d",
+        showline=True,
+        linewidth=1,
+        linecolor="rgba(150,150,150,0.5)",
+    )
+    fig.update_yaxes(
+        title_text=y_title,
+        showgrid=True,
+        gridcolor=GRID_COLOR,
+        showline=True,
+        linewidth=1,
+        linecolor="rgba(150,150,150,0.5)",
+        zeroline=False,
+    )
+
+
+def _split_hist_fcst(df: pd.DataFrame, today: pd.Timestamp) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    is_hist = df["date"] <= today
+    return df[is_hist].copy(), df[~is_hist].copy()
+
+
+# ---------------------------------------------------------------------------
+# 1) Gas balance — daily composition of Serbia demand
+# ---------------------------------------------------------------------------
+
+# Order matters: bars stack bottom-up in the legend order.
+SUPPLY_COMPONENTS: List[Tuple[str, str, str]] = [
+    ("import_kalotina_mcm",   "Import Kalotina",    COLOR_KALOTINA),
+    ("import_bg_mcm",         "Import from BG",     COLOR_BG_IMPORT),
+    ("production_mcm",        "Production",         COLOR_PRODUCTION),
+    ("import_hu_others_mcm",  "Import HU (others)", COLOR_HU_OTHERS),
+    ("import_hu_met_mcm",     "Import HU (MET)",    COLOR_HU_MET),
+]
+
+
+def plot_gas_balance_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
+    """
+    Stacked-bar supply composition + red required-demand line.
+
+    Historical bars are solid; forecast bars are hatched (marker_pattern_shape).
+    Historical demand is a solid red line; forecast demand is dashed red.
+    """
+    fig = go.Figure()
+    hist, fcst = _split_hist_fcst(df, today)
+
+    for col, label, color in SUPPLY_COMPONENTS:
+        # Skip any component that is identically zero
+        if col not in df.columns or df[col].abs().sum() == 0:
+            continue
+
+        # Historical (solid)
+        fig.add_trace(
+            go.Bar(
+                x=hist["date"],
+                y=hist[col],
+                name=label,
+                marker_color=color,
+                marker_line_width=0,
+                legendgroup=label,
+                offsetgroup=label,
+                hovertemplate=f"{label}: %{{y:.2f}} mcm/d<extra></extra>",
+            )
+        )
+        # Forecast (hatched, same legend group → toggles with the historical)
+        if not fcst.empty:
+            fig.add_trace(
+                go.Bar(
+                    x=fcst["date"],
+                    y=fcst[col],
+                    name=f"{label} (fcst)",
+                    marker_color=color,
+                    marker_pattern_shape="/",
+                    marker_pattern_solidity=0.35,
+                    marker_pattern_fgcolor="white",
+                    marker_line_width=0,
+                    legendgroup=label,
+                    offsetgroup=label,
+                    showlegend=False,
+                    hovertemplate=f"{label} (fcst): %{{y:.2f}} mcm/d<extra></extra>",
+                )
+            )
+
+    # Required demand — solid red historical, dashed red forecast
+    fig.add_trace(
+        go.Scatter(
+            x=hist["date"],
+            y=hist["required_actual_mcm"],
+            mode="lines+markers",
+            name="Required (est.)",
+            line=dict(color=COLOR_DEMAND, width=2.5),
+            marker=dict(size=5, color=COLOR_DEMAND),
+            legendgroup="demand",
+            hovertemplate="Required: %{y:.2f} mcm/d<extra></extra>",
+        )
+    )
+    if not fcst.empty:
+        # Bridge from last historical to first forecast point so the line is continuous
+        bridge = pd.DataFrame(
+            {
+                "date": [hist["date"].iloc[-1]] + list(fcst["date"]) if not hist.empty else list(fcst["date"]),
+                "required_forecast_mcm": (
+                    [hist["required_actual_mcm"].iloc[-1]] + list(fcst["required_forecast_mcm"])
+                    if not hist.empty
+                    else list(fcst["required_forecast_mcm"])
+                ),
+            }
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=bridge["date"],
+                y=bridge["required_forecast_mcm"],
+                mode="lines+markers",
+                name="Required (fcst)",
+                line=dict(color=COLOR_DEMAND, width=2.5, dash="dash"),
+                marker=dict(size=5, color=COLOR_DEMAND, symbol="circle-open"),
+                legendgroup="demand",
+                hovertemplate="Required (fcst): %{y:.2f} mcm/d<extra></extra>",
+            )
+        )
+
+    _today_band(fig, today)
+    fig.update_layout(barmode="stack")
+    _apply_common_layout(
+        fig,
+        title="Daily composition of Serbia demand",
+        y_title="mcm/day",
+        height=360,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 2) Belgrade temperature
+# ---------------------------------------------------------------------------
+
+def plot_temperature_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
+    """Solid blue actual + dashed blue forecast."""
+    fig = go.Figure()
+    hist, fcst = _split_hist_fcst(df, today)
+
+    fig.add_trace(
+        go.Scatter(
+            x=hist["date"],
+            y=hist["temperature_actual_c"],
+            mode="lines+markers",
+            name="Temp (actual)",
+            line=dict(color=COLOR_TEMP, width=2),
+            marker=dict(size=4, color=COLOR_TEMP),
+            hovertemplate="%{y:.1f} °C<extra></extra>",
+        )
+    )
+
+    if not fcst.empty:
+        bridge = pd.DataFrame(
+            {
+                "date": ([hist["date"].iloc[-1]] if not hist.empty else []) + list(fcst["date"]),
+                "temperature_forecast_c": (
+                    ([hist["temperature_actual_c"].iloc[-1]] if not hist.empty else [])
+                    + list(fcst["temperature_forecast_c"])
+                ),
+            }
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=bridge["date"],
+                y=bridge["temperature_forecast_c"],
+                mode="lines+markers",
+                name="Temp (fcst)",
+                line=dict(color=COLOR_TEMP, width=2, dash="dash"),
+                marker=dict(size=4, color=COLOR_TEMP, symbol="circle-open"),
+                hovertemplate="%{y:.1f} °C (fcst)<extra></extra>",
+            )
+        )
+
+    _today_band(fig, today)
+    _apply_common_layout(
+        fig,
+        title="Belgrade temperature (°C)",
+        y_title="°C",
+        height=200,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# 3) Storage +/-
+# ---------------------------------------------------------------------------
+
+def plot_storage_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
+    """
+    Positive storage_imbalance → injection (green bars above zero).
+    Negative → withdrawal (red bars below zero).
+    Forecast bars are hatched.
+    """
+    fig = go.Figure()
+    hist, fcst = _split_hist_fcst(df, today)
+
+    # Historical
+    fig.add_trace(
+        go.Bar(
+            x=hist["date"],
+            y=hist["storage_imbalance_mcm"],
+            name="Storage +/- (hist)",
+            marker_color=np.where(
+                hist["storage_imbalance_mcm"] >= 0,
+                COLOR_STORAGE_POS,
+                COLOR_STORAGE_NEG,
+            ),
+            marker_line_width=0,
+            showlegend=False,
+            hovertemplate="%{y:+.2f} mcm/d<extra></extra>",
+        )
+    )
+
+    # Forecast (hatched)
+    if not fcst.empty:
+        fig.add_trace(
+            go.Bar(
+                x=fcst["date"],
+                y=fcst["storage_imbalance_mcm"],
+                name="Storage +/- (fcst)",
+                marker_color=np.where(
+                    fcst["storage_imbalance_mcm"] >= 0,
+                    COLOR_STORAGE_POS,
+                    COLOR_STORAGE_NEG,
+                ),
+                marker_pattern_shape="/",
+                marker_pattern_solidity=0.35,
+                marker_pattern_fgcolor="white",
+                marker_line_width=0,
+                showlegend=False,
+                hovertemplate="%{y:+.2f} mcm/d (fcst)<extra></extra>",
+            )
+        )
+
+    # Strong horizontal zero line
+    fig.add_hline(y=0, line_color=COLOR_DEMAND, line_width=2)
+
+    # Auto-scale around the values but keep zero clearly visible
+    y_min = float(df["storage_imbalance_mcm"].min())
+    y_max = float(df["storage_imbalance_mcm"].max())
+    if abs(y_max - y_min) < 1e-6:
+        pad = max(0.5, abs(y_max) * 0.5)
+    else:
+        pad = (y_max - y_min) * 0.15
+    # Ensure zero stays in the visible window
+    y_lo = min(y_min - pad, -pad / 2)
+    y_hi = max(y_max + pad, pad / 2)
+
+    _today_band(fig, today)
+    _apply_common_layout(
+        fig,
+        title="Storage +/-",
+        y_title="mcm/day",
+        height=220,
+        show_legend=False,
+    )
+    fig.update_yaxes(range=[y_lo, y_hi])
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Flow details chart
+# ---------------------------------------------------------------------------
+
+def plot_flow_details_chart(
+    flow_df: pd.DataFrame,
+    today: pd.Timestamp,
+    point_labels: dict,
+) -> go.Figure:
+    """Per-point flow lines in mcm/day."""
+    fig = go.Figure()
+    palette = {
+        "kiskundorozsma_hu": COLOR_HU_OTHERS,
+        "kireevo": COLOR_BG_IMPORT,
+        "kiskundorozsma_2": COLOR_HU_MET,
+        "kalotina": COLOR_KALOTINA,
+    }
+    for point in flow_df.columns:
+        if point == "date":
+            continue
+        color = palette.get(point, None)
+        sub = flow_df[["date", point]].rename(columns={point: "value"})
+        hist = sub[sub["date"] <= today]
+        fcst = sub[sub["date"] > today]
+
+        fig.add_trace(
+            go.Scatter(
+                x=hist["date"],
+                y=hist["value"],
+                mode="lines+markers",
+                name=point_labels.get(point, point),
+                line=dict(width=2, color=color),
+                marker=dict(size=4),
+                legendgroup=point,
+            )
+        )
+        if not fcst.empty:
+            bridge_x = ([hist["date"].iloc[-1]] if not hist.empty else []) + list(fcst["date"])
+            bridge_y = ([hist["value"].iloc[-1]] if not hist.empty else []) + list(fcst["value"])
+            fig.add_trace(
+                go.Scatter(
+                    x=bridge_x,
+                    y=bridge_y,
+                    mode="lines+markers",
+                    name=f"{point_labels.get(point, point)} (fcst)",
+                    line=dict(width=2, color=color, dash="dash"),
+                    marker=dict(size=4, symbol="circle-open"),
+                    legendgroup=point,
+                    showlegend=False,
+                )
+            )
+
+    _today_band(fig, today)
+    _apply_common_layout(
+        fig,
+        title="Physical flows by point",
+        y_title="mcm/day",
+        height=380,
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Capacity charts
+# ---------------------------------------------------------------------------
+
+def plot_capacity_booked_chart(cap_df: pd.DataFrame) -> go.Figure:
+    """Grouped bar of booked capacity by border point × period."""
+    fig = go.Figure()
+    for product in sorted(cap_df["product"].dropna().unique()):
+        sub = cap_df[cap_df["product"] == product]
+        fig.add_trace(
+            go.Bar(
+                x=sub["border_point"] + " (" + sub["period"].astype(str) + ")",
+                y=sub["booked_mwh"],
+                name=str(product).capitalize(),
+            )
+        )
+    fig.update_layout(barmode="group")
+    _apply_common_layout(
+        fig,
+        title="Booked capacity (MWh/day)",
+        y_title="MWh/day",
+        height=340,
+    )
+    fig.update_xaxes(tickangle=-30)
+    return fig
+
+
+def plot_capacity_utilisation_chart(cap_df: pd.DataFrame) -> go.Figure:
+    """Grouped bar of utilisation % with 100% reference line."""
+    fig = go.Figure()
+    for product in sorted(cap_df["product"].dropna().unique()):
+        sub = cap_df[cap_df["product"] == product]
+        fig.add_trace(
+            go.Bar(
+                x=sub["border_point"] + " (" + sub["period"].astype(str) + ")",
+                y=sub["utilisation_pct"],
+                name=str(product).capitalize(),
+            )
+        )
+    fig.add_hline(
+        y=100,
+        line_dash="dash",
+        line_color=COLOR_DEMAND,
+        annotation_text="100 %",
+        annotation_position="top right",
+    )
+    fig.update_layout(barmode="group")
+    _apply_common_layout(
+        fig,
+        title="Capacity utilisation (%)",
+        y_title="%",
+        height=340,
+    )
+    fig.update_xaxes(tickangle=-30)
+    return fig
+
+
+def plot_capacity_price_chart(cap_df: pd.DataFrame) -> Tuple[go.Figure, go.Figure]:
+    """
+    Two separate price charts — one per currency — because HUF and EUR
+    magnitudes differ by ~100× and can't share a y-axis cleanly.
+    Returns (huf_fig, eur_fig). Either may be None if no data.
+    """
+    figs = {}
+    for ccy in ["HUF", "EUR"]:
+        sub = cap_df[cap_df["currency"] == ccy]
+        if sub.empty:
+            figs[ccy] = None
+            continue
+        fig = go.Figure()
+        for product in sorted(sub["product"].dropna().unique()):
+            ssub = sub[sub["product"] == product]
+            fig.add_trace(
+                go.Bar(
+                    x=ssub["border_point"] + " (" + ssub["period"].astype(str) + ")",
+                    y=ssub["price"],
+                    name=str(product).capitalize(),
+                )
+            )
+        fig.update_layout(barmode="group")
+        _apply_common_layout(
+            fig,
+            title=f"Price comparison ({ccy}/kWh/h/day)",
+            y_title=f"{ccy}/kWh/h/day",
+            height=320,
+        )
+        fig.update_xaxes(tickangle=-30)
+        figs[ccy] = fig
+    return figs.get("HUF"), figs.get("EUR")
