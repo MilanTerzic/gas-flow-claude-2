@@ -123,10 +123,12 @@ with st.sidebar:
         "Curve distortion factor", value=CURVE_DISTORTION_DEFAULT, step=0.1,
         help="1.0 = no distortion (default). Workbook uses 2.8 only in extreme cold scenarios.",
     )
-    bih_pct = st.slider(
+    bih_pct_percent = st.slider(
         "Bosnia consumption / export (% of Import from BG)",
         min_value=0.0, max_value=20.0, value=BIH_SHARE * 100, step=0.5,
-    ) / 100.0
+        key="bosnia_consumption_percent",
+    )
+    bih_pct = bih_pct_percent / 100.0
     production_mcm = st.number_input(
         "Domestic production (mcm/day)", value=DOMESTIC_PRODUCTION_MCM, step=0.1,
     )
@@ -248,7 +250,7 @@ with tab_balance:
     # First row of KPIs
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Forecasted demand", f"{kpi_row['demand_mcm']:,.2f} mcm/d")
-    k2.metric("Total available supply", f"{kpi_row['serbian_available_supply_mcm']:,.2f} mcm/d")
+    k2.metric("Available for Serbia", f"{kpi_row['serbian_available_supply_mcm']:,.2f} mcm/d")
     storage_val = kpi_row["storage_imbalance_mcm"]
     k3.metric(
         "Storage +/-",
@@ -265,13 +267,21 @@ with tab_balance:
     # Second row of KPIs
     k5, k6, k7, k8 = st.columns(4)
     k5.metric("Import from HU (Kiskundorozsma)", f"{kpi_row['kiskundorozsma_entry_mcm']:,.2f} mcm/d")
-    k6.metric("Imports from Bulgaria", f"{kpi_row['imports_from_bulgaria_mcm']:,.2f} mcm/d")
+    k6.metric(
+        "Imports from Bulgaria",
+        f"{kpi_row['imports_from_bulgaria_mcm']:,.2f} mcm/d",
+        delta=f"net: {kpi_row['imports_from_bulgaria_available_mcm']:,.2f} mcm/d",
+    )
     k7.metric("Kalotina entry", f"{kpi_row['kalotina_entry_mcm']:,.2f} mcm/d")
     k8.metric("Domestic production", f"{kpi_row['domestic_production_mcm']:,.2f} mcm/d")
 
     # Third KPI row — Bosnia export
     k9, _, _, _ = st.columns(4)
-    k9.metric("Bosnia consumption/export", f"{kpi_row['bosnia_consumption_mcm']:,.2f} mcm/d")
+    k9.metric(
+        "Bosnia consumption/export",
+        f"{kpi_row['bosnia_consumption_mcm']:,.2f} mcm/d",
+        delta=f"{bih_pct_percent:.1f}% of BG import",
+    )
 
     st.markdown("")  # small gap
 
@@ -280,11 +290,20 @@ with tab_balance:
             validation_cols = [
                 "date",
                 "imports_from_bulgaria_mcm",
+                "bosnia_consumption_pct",
+                "bosnia_consumption_mcm",
+                "imports_from_bulgaria_available_mcm",
                 "kalotina_entry_mcm",
                 "kiskundorozsma_entry_mcm",
                 "domestic_production_mcm",
+                "serbian_supply_before_bosnia_mcm",
                 "stacked_supply_total_mcm",
+                "serbian_available_supply_mcm",
                 "demand_mcm",
+                "storage_imbalance_raw_mcm",
+                "storage_injection_mcm",
+                "storage_withdrawal_mcm",
+                "storage_imbalance_mcm",
                 "required_actual_mcm",
                 "required_forecast_mcm",
                 "is_forecast",
@@ -347,12 +366,20 @@ with tab_balance:
             "avg_temperature_c",
             "demand_mcm",
             "imports_from_bulgaria_mcm",
+            "bosnia_consumption_pct",
+            "bosnia_consumption_mcm",
+            "imports_from_bulgaria_available_mcm",
             "kalotina_entry_mcm",
             "kiskundorozsma_entry_mcm",
             "domestic_production_mcm",
-            "bosnia_consumption_mcm",
+            "serbian_supply_before_bosnia_mcm",
             "serbian_available_supply_mcm",
+            "storage_imbalance_raw_mcm",
+            "storage_injection_mcm",
+            "storage_withdrawal_mcm",
             "storage_imbalance_mcm",
+            "unserved_deficit_after_storage_limit_mcm",
+            "uncaptured_surplus_after_storage_limit_mcm",
             "is_forecast",
         ]
         display = balance[show_cols].copy()

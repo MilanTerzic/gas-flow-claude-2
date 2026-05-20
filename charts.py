@@ -130,7 +130,7 @@ def _split_hist_fcst(df: pd.DataFrame, today: pd.Timestamp) -> Tuple[pd.DataFram
 # Order = bottom-up in the stack and in the legend.
 # Four components only — no HU MET/others split.
 SUPPLY_COMPONENTS: List[Tuple[str, str, str]] = [
-    ("imports_from_bulgaria_mcm",  "Imports from Bulgaria", COLOR_BG_IMPORT),
+    ("imports_from_bulgaria_available_mcm",  "Imports from Bulgaria", COLOR_BG_IMPORT),
     ("kalotina_entry_mcm",         "Kalotina entry",        COLOR_KALOTINA),
     ("kiskundorozsma_entry_mcm",   "Kiskundorozsma entry",  COLOR_HU_OTHERS),
     ("domestic_production_mcm",    "Domestic production",   COLOR_PRODUCTION),

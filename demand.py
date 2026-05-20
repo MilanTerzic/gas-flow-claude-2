@@ -40,7 +40,7 @@ import pandas as pd
 
 
 SUPPLY_COMPONENT_COLUMNS = [
-    "imports_from_bulgaria_mcm",
+    "imports_from_bulgaria_available_mcm",
     "kalotina_entry_mcm",
     "kiskundorozsma_entry_mcm",
     "domestic_production_mcm",
@@ -100,6 +100,8 @@ def build_balance(
     curve_distortion: float = 1.0,
     bih_share: float = 0.08,
     domestic_production: float = 0.5,
+    max_storage_injection: float = 2.7,
+    max_storage_withdrawal: float = 5.0,
 ) -> pd.DataFrame:
     """
     Build the daily Serbian gas balance frame on the master date_index.
@@ -141,32 +143,51 @@ def build_balance(
 
     # ---- Flows (already in mcm/day from the flows module) ------------------
     flow_aligned = flow_df.set_index("date").reindex(date_index).fillna(0.0)
-    has_direct_bosnia_transit = "kiskundorozsma_2" in flow_df.columns
     kkd_hu = flow_aligned.get("kiskundorozsma_hu", pd.Series(0.0, index=date_index))
     kireevo = flow_aligned.get("kireevo", pd.Series(0.0, index=date_index))
     kkd_2 = flow_aligned.get("kiskundorozsma_2", pd.Series(0.0, index=date_index))
     kalotina = flow_aligned.get("kalotina", pd.Series(0.0, index=date_index))
-    bosnia_transit = kkd_2.clip(lower=0.0)
-    if not has_direct_bosnia_transit:
-        bosnia_transit = (kireevo * float(bih_share)).clip(lower=0.0)
+    imports_from_bulgaria = (kireevo - kkd_2.clip(lower=0.0)).clip(lower=0.0)
+    bosnia_consumption = (imports_from_bulgaria * float(bih_share)).clip(lower=0.0)
 
     # ---- Four supply components (no MET / others split) -------------------
     # kiskundorozsma_hu is the public HU>RS point-direction; if ENTSOG returns
     # zero, the plotted component remains zero. Kiskundorozsma-2/Horgos is
-    # treated as Bosnia-related transit and deducted from Kireevo.
+    # deducted from Kireevo before the Bosnia percentage is applied.
     df["kalotina_entry_mcm"] = kalotina.values
     df["kiskundorozsma_entry_mcm"] = kkd_hu.values
-    df["bosnia_consumption_mcm"] = bosnia_transit.values
-    df["imports_from_bulgaria_mcm"] = (kireevo - bosnia_transit).clip(lower=0.0).values
+    df["imports_from_bulgaria_mcm"] = imports_from_bulgaria.values
+    df["bosnia_consumption_pct"] = float(bih_share) * 100.0
+    df["bosnia_consumption_mcm"] = bosnia_consumption.values
+    df["imports_from_bulgaria_available_mcm"] = (
+        df["imports_from_bulgaria_mcm"] - df["bosnia_consumption_mcm"]
+    ).clip(lower=0.0)
     df["domestic_production_mcm"] = float(domestic_production)
 
-    df["serbian_available_supply_mcm"] = (
+    df["serbian_supply_before_bosnia_mcm"] = (
         df["imports_from_bulgaria_mcm"]
         + df["kalotina_entry_mcm"]
         + df["kiskundorozsma_entry_mcm"]
         + df["domestic_production_mcm"]
     )
-    df["storage_imbalance_mcm"] = df["serbian_available_supply_mcm"] - df["demand_mcm"]
+    df["serbian_available_supply_mcm"] = (
+        df["serbian_supply_before_bosnia_mcm"] - df["bosnia_consumption_mcm"]
+    )
+
+    df["storage_imbalance_raw_mcm"] = df["serbian_available_supply_mcm"] - df["demand_mcm"]
+    capped_storage = df["storage_imbalance_raw_mcm"].clip(
+        lower=-float(max_storage_withdrawal),
+        upper=float(max_storage_injection),
+    )
+    df["storage_imbalance_mcm"] = capped_storage
+    df["storage_injection_mcm"] = capped_storage.clip(lower=0.0)
+    df["storage_withdrawal_mcm"] = -capped_storage.clip(upper=0.0)
+    df["unserved_deficit_after_storage_limit_mcm"] = (
+        -df["storage_imbalance_raw_mcm"] - float(max_storage_withdrawal)
+    ).clip(lower=0.0)
+    df["uncaptured_surplus_after_storage_limit_mcm"] = (
+        df["storage_imbalance_raw_mcm"] - float(max_storage_injection)
+    ).clip(lower=0.0)
 
     return df
 
