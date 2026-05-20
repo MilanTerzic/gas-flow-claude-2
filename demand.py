@@ -139,6 +139,74 @@ def _apply_current_day_flow_estimate(
     return out
 
 
+def _append_estimated_component(existing: str, component: str) -> str:
+    parts = [p.strip() for p in str(existing).split(",") if p.strip()]
+    if component not in parts:
+        parts.append(component)
+    return ", ".join(parts)
+
+
+def _apply_current_day_derived_estimate(
+    df: pd.DataFrame,
+    today_ts: pd.Timestamp,
+) -> pd.DataFrame:
+    """
+    Guard derived chart components against partial same-day ENTSOG reporting.
+
+    Kireevo and the Kiskundorozsma-2 deduction can publish at different times.
+    If today's net Bulgaria import is zero/missing, or jumps well above
+    yesterday's net value, use yesterday's final net value for today only.
+    """
+    out = df.copy()
+    today_mask = out["date"] == today_ts
+    yesterday_mask = out["date"] == today_ts - pd.Timedelta(days=1)
+    if not today_mask.any() or not yesterday_mask.any():
+        return out
+
+    today_idx = out.index[today_mask][0]
+    yesterday_idx = out.index[yesterday_mask][0]
+
+    def should_use_yesterday(col: str, spike_ratio: float = 1.5, spike_abs: float = 3.0) -> bool:
+        today_value = out.at[today_idx, col]
+        yesterday_value = out.at[yesterday_idx, col]
+        if pd.isna(yesterday_value) or float(yesterday_value) <= 0.0:
+            return False
+        if pd.isna(today_value) or float(today_value) == 0.0:
+            return True
+        return float(today_value) > max(
+            float(yesterday_value) * spike_ratio,
+            float(yesterday_value) + spike_abs,
+        )
+
+    if should_use_yesterday("imports_from_bulgaria_mcm"):
+        for col in [
+            "imports_from_bulgaria_mcm",
+            "bosnia_consumption_mcm",
+            "imports_from_bulgaria_available_mcm",
+        ]:
+            out.at[today_idx, col] = out.at[yesterday_idx, col]
+        out.at[today_idx, "is_current_day_estimate"] = True
+        out.at[today_idx, "current_day_estimated_components"] = (
+            _append_estimated_component(
+                out.at[today_idx, "current_day_estimated_components"],
+                "imports_from_bulgaria_mcm",
+            )
+        )
+
+    for col in ["kalotina_entry_mcm", "kiskundorozsma_entry_mcm"]:
+        if should_use_yesterday(col):
+            out.at[today_idx, col] = out.at[yesterday_idx, col]
+            out.at[today_idx, "is_current_day_estimate"] = True
+            out.at[today_idx, "current_day_estimated_components"] = (
+                _append_estimated_component(
+                    out.at[today_idx, "current_day_estimated_components"],
+                    col,
+                )
+            )
+
+    return out
+
+
 def build_balance(
     date_index: pd.DatetimeIndex,
     today_ts: pd.Timestamp,
@@ -230,6 +298,7 @@ def build_balance(
     df["current_day_estimated_components"] = estimate_flags[
         "current_day_estimated_components"
     ].values
+    df = _apply_current_day_derived_estimate(df, today_ts)
 
     df["serbian_supply_before_bosnia_mcm"] = (
         df["imports_from_bulgaria_mcm"]
