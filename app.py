@@ -262,11 +262,10 @@ with tab_balance:
 
     # Second row of KPIs
     k5, k6, k7, k8 = st.columns(4)
-    import_hu_total = kpi_row["import_hu_others_mcm"] + kpi_row["import_hu_met_mcm"]
-    k5.metric("Import from HU", f"{import_hu_total:,.2f} mcm/d")
-    k6.metric("Import from BG (net)", f"{kpi_row['import_bg_mcm']:,.2f} mcm/d")
-    k7.metric("Import Kalotina", f"{kpi_row['import_kalotina_mcm']:,.2f} mcm/d")
-    k8.metric("Production", f"{kpi_row['production_mcm']:,.2f} mcm/d")
+    k5.metric("Import from HU (Kiskundorozsma)", f"{kpi_row['kiskundorozsma_entry_mcm']:,.2f} mcm/d")
+    k6.metric("Imports from Bulgaria", f"{kpi_row['imports_from_bulgaria_mcm']:,.2f} mcm/d")
+    k7.metric("Kalotina entry", f"{kpi_row['kalotina_entry_mcm']:,.2f} mcm/d")
+    k8.metric("Domestic production", f"{kpi_row['domestic_production_mcm']:,.2f} mcm/d")
 
     # Third KPI row — Bosnia export
     k9, _, _, _ = st.columns(4)
@@ -297,11 +296,10 @@ with tab_balance:
             "temperature_c",
             "avg_temperature_c",
             "demand_mcm",
-            "import_kalotina_mcm",
-            "import_bg_mcm",
-            "import_hu_others_mcm",
-            "import_hu_met_mcm",
-            "production_mcm",
+            "imports_from_bulgaria_mcm",
+            "kalotina_entry_mcm",
+            "kiskundorozsma_entry_mcm",
+            "domestic_production_mcm",
             "bosnia_consumption_mcm",
             "serbian_available_supply_mcm",
             "storage_imbalance_mcm",

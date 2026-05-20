@@ -18,17 +18,16 @@ sheet "Serbian Gas Cons. forecast":
 The output frame uses the explicit ``*_mcm`` column naming required by
 the dashboard layer:
 
-    import_kalotina_mcm
-    import_bg_mcm
-    production_mcm
-    import_hu_others_mcm
-    import_hu_met_mcm
+    kalotina_entry_mcm
+    kiskundorozsma_entry_mcm
+    imports_from_bulgaria_mcm   = kireevo_entry - kiskundorozsma_2_entry
+    domestic_production_mcm     = 0.5 mcm/day (configurable)
+    serbian_available_supply_mcm
     required_actual_mcm
     required_forecast_mcm
     temperature_actual_c
     temperature_forecast_c
-    bosnia_consumption_mcm
-    serbian_available_supply_mcm
+    bosnia_consumption_mcm      (kept for reference / KPI, not in main stack)
     storage_imbalance_mcm
 """
 
@@ -116,28 +115,22 @@ def build_balance(
     kkd_2 = flow_aligned.get("kiskundorozsma_2", pd.Series(0.0, index=date_index))
     kalotina = flow_aligned.get("kalotina", pd.Series(0.0, index=date_index))
 
-    # MET vs Others on the Hungarian side
-    if "kiskundorozsma_hu_met" in flow_aligned.columns:
-        met = flow_aligned["kiskundorozsma_hu_met"].fillna(0.0)
-        others = (kkd_hu - met).clip(lower=0.0)
-    else:
-        met = pd.Series(0.0, index=date_index)
-        others = kkd_hu
+    # ---- Four supply components (no MET / others split) -------------------
+    df["kalotina_entry_mcm"] = kalotina.values
+    df["kiskundorozsma_entry_mcm"] = kkd_hu.values
+    df["imports_from_bulgaria_mcm"] = (kireevo - kkd_2).clip(lower=0.0).values
+    df["domestic_production_mcm"] = float(domestic_production)
 
-    df["import_kalotina_mcm"] = kalotina.values
-    df["import_bg_mcm"] = (kireevo - kkd_2).clip(lower=0.0).values
-    df["import_hu_others_mcm"] = others.values
-    df["import_hu_met_mcm"] = met.values
-    df["production_mcm"] = float(domestic_production)
-    df["bosnia_consumption_mcm"] = bih_share * df["import_bg_mcm"]
+    # Bosnia consumption is kept as an informational KPI but is NOT subtracted
+    # from the visible supply stack any more — the user requested the stack
+    # to be exactly: BG + Kalotina + Kiskundorozsma + Production.
+    df["bosnia_consumption_mcm"] = bih_share * df["imports_from_bulgaria_mcm"]
 
     df["serbian_available_supply_mcm"] = (
-        df["import_hu_others_mcm"]
-        + df["import_hu_met_mcm"]
-        + df["import_bg_mcm"]
-        + df["import_kalotina_mcm"]
-        + df["production_mcm"]
-        - df["bosnia_consumption_mcm"]
+        df["imports_from_bulgaria_mcm"]
+        + df["kalotina_entry_mcm"]
+        + df["kiskundorozsma_entry_mcm"]
+        + df["domestic_production_mcm"]
     )
     df["storage_imbalance_mcm"] = df["serbian_available_supply_mcm"] - df["demand_mcm"]
 

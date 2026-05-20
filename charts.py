@@ -109,106 +109,120 @@ def _split_hist_fcst(df: pd.DataFrame, today: pd.Timestamp) -> Tuple[pd.DataFram
 
 
 # ---------------------------------------------------------------------------
-# 1) Gas balance — daily composition of Serbia demand
+# 1) Gas balance — daily composition of Serbia demand (stacked area)
 # ---------------------------------------------------------------------------
 
-# Order matters: bars stack bottom-up in the legend order.
+# Order = bottom-up in the stack and in the legend.
+# Four components only — no HU MET/others split.
 SUPPLY_COMPONENTS: List[Tuple[str, str, str]] = [
-    ("import_kalotina_mcm",   "Import Kalotina",    COLOR_KALOTINA),
-    ("import_bg_mcm",         "Import from BG",     COLOR_BG_IMPORT),
-    ("production_mcm",        "Production",         COLOR_PRODUCTION),
-    ("import_hu_others_mcm",  "Import HU (others)", COLOR_HU_OTHERS),
-    ("import_hu_met_mcm",     "Import HU (MET)",    COLOR_HU_MET),
+    ("imports_from_bulgaria_mcm",  "Imports from Bulgaria", COLOR_BG_IMPORT),
+    ("kalotina_entry_mcm",         "Kalotina entry",        COLOR_KALOTINA),
+    ("kiskundorozsma_entry_mcm",   "Kiskundorozsma entry",  COLOR_HU_OTHERS),
+    ("domestic_production_mcm",    "Domestic production",   COLOR_PRODUCTION),
 ]
 
 
 def plot_gas_balance_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
     """
-    Stacked-bar supply composition + red required-demand line.
+    Cumulative stacked-area supply composition + red required-demand line.
 
-    Historical bars are solid; forecast bars are hatched (marker_pattern_shape).
-    Historical demand is a solid red line; forecast demand is dashed red.
+    Each component is rendered as TWO Scatter traces sharing a legendgroup:
+    a solid-fill historical area (rows where date <= today) and a
+    lighter-fill forecast area (rows where date > today). Both go into the
+    same ``stackgroup`` so the visual stack remains continuous across the
+    today boundary.
+
+    The red demand line sits on top — solid for historical, dashed for
+    forecast.
     """
     fig = go.Figure()
-    hist, fcst = _split_hist_fcst(df, today)
+
+    # Pre-split each component into hist / fcst series. We blank the "other
+    # half" by setting it to None so the same stackgroup doesn't double-count
+    # at the today boundary.
+    is_hist = df["date"] <= today
+    has_fcst = (~is_hist).any()
 
     for col, label, color in SUPPLY_COMPONENTS:
-        # Skip any component that is identically zero
         if col not in df.columns or df[col].abs().sum() == 0:
             continue
 
-        # Historical (solid)
+        hist_y = df[col].where(is_hist)
+        fcst_y = df[col].where(~is_hist)
+
+        # Bridge: copy the value at the boundary date into the forecast series
+        # so the stacked area joins smoothly across today.
+        if has_fcst and is_hist.any():
+            last_hist_idx = df.index[is_hist][-1]
+            fcst_y = fcst_y.copy()
+            fcst_y.loc[last_hist_idx] = df.loc[last_hist_idx, col]
+
+        # Historical area — solid
         fig.add_trace(
-            go.Bar(
-                x=hist["date"],
-                y=hist[col],
+            go.Scatter(
+                x=df["date"],
+                y=hist_y,
                 name=label,
-                marker_color=color,
-                marker_line_width=0,
+                mode="lines",
+                line=dict(width=0.5, color=color),
+                fillcolor=color,
+                stackgroup="supply",
                 legendgroup=label,
-                offsetgroup=label,
                 hovertemplate=f"{label}: %{{y:.2f}} mcm/d<extra></extra>",
             )
         )
-        # Forecast (hatched, same legend group → toggles with the historical)
-        if not fcst.empty:
+        # Forecast area — same color, lighter (semi-transparent) so the
+        # boundary is visually obvious.
+        if has_fcst:
             fig.add_trace(
-                go.Bar(
-                    x=fcst["date"],
-                    y=fcst[col],
+                go.Scatter(
+                    x=df["date"],
+                    y=fcst_y,
                     name=f"{label} (fcst)",
-                    marker_color=color,
-                    marker_pattern_shape="/",
-                    marker_pattern_solidity=0.35,
-                    marker_pattern_fgcolor="white",
-                    marker_line_width=0,
+                    mode="lines",
+                    line=dict(width=0.5, color=color, dash="dot"),
+                    fillcolor=_with_alpha(color, 0.45),
+                    stackgroup="supply",
                     legendgroup=label,
-                    offsetgroup=label,
                     showlegend=False,
                     hovertemplate=f"{label} (fcst): %{{y:.2f}} mcm/d<extra></extra>",
                 )
             )
 
-    # Required demand — solid red historical, dashed red forecast
+    # ---- Required demand on top of the stack -----------------------------
+    hist, fcst = _split_hist_fcst(df, today)
+
     fig.add_trace(
         go.Scatter(
             x=hist["date"],
             y=hist["required_actual_mcm"],
-            mode="lines+markers",
+            mode="lines",
             name="Required (est.)",
             line=dict(color=COLOR_DEMAND, width=2.5),
-            marker=dict(size=5, color=COLOR_DEMAND),
             legendgroup="demand",
             hovertemplate="Required: %{y:.2f} mcm/d<extra></extra>",
         )
     )
     if not fcst.empty:
-        # Bridge from last historical to first forecast point so the line is continuous
-        bridge = pd.DataFrame(
-            {
-                "date": [hist["date"].iloc[-1]] + list(fcst["date"]) if not hist.empty else list(fcst["date"]),
-                "required_forecast_mcm": (
-                    [hist["required_actual_mcm"].iloc[-1]] + list(fcst["required_forecast_mcm"])
-                    if not hist.empty
-                    else list(fcst["required_forecast_mcm"])
-                ),
-            }
+        # Bridge from the last historical point so the line is continuous.
+        bridge_x = ([hist["date"].iloc[-1]] if not hist.empty else []) + list(fcst["date"])
+        bridge_y = (
+            ([hist["required_actual_mcm"].iloc[-1]] if not hist.empty else [])
+            + list(fcst["required_forecast_mcm"])
         )
         fig.add_trace(
             go.Scatter(
-                x=bridge["date"],
-                y=bridge["required_forecast_mcm"],
-                mode="lines+markers",
+                x=bridge_x,
+                y=bridge_y,
+                mode="lines",
                 name="Required (fcst)",
                 line=dict(color=COLOR_DEMAND, width=2.5, dash="dash"),
-                marker=dict(size=5, color=COLOR_DEMAND, symbol="circle-open"),
                 legendgroup="demand",
                 hovertemplate="Required (fcst): %{y:.2f} mcm/d<extra></extra>",
             )
         )
 
     _today_band(fig, today)
-    fig.update_layout(barmode="stack")
     _apply_common_layout(
         fig,
         title="Daily composition of Serbia demand",
@@ -216,6 +230,15 @@ def plot_gas_balance_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
         height=360,
     )
     return fig
+
+
+def _with_alpha(color: str, alpha: float) -> str:
+    """Convert a #rrggbb hex string into an rgba() string with the given alpha."""
+    c = color.lstrip("#")
+    if len(c) != 6:
+        return color
+    r, g, b = int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 # ---------------------------------------------------------------------------
