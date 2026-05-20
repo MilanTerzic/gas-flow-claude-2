@@ -41,7 +41,7 @@ from config import (
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-DEFAULT_MARGIN = dict(l=50, r=20, t=50, b=35)
+DEFAULT_MARGIN = dict(l=60, r=20, t=50, b=40)
 
 
 def _today_band(fig: go.Figure, today: pd.Timestamp) -> None:
@@ -64,7 +64,7 @@ def _apply_common_layout(
     height: int,
     show_legend: bool = True,
 ) -> None:
-    layout_title = None
+    layout_title = dict(text="")
     margin = DEFAULT_MARGIN.copy()
     legend_y = 1.02
     if title:
@@ -92,7 +92,7 @@ def _apply_common_layout(
             yanchor="bottom",
             y=legend_y,
             xanchor="left",
-            x=0.0,
+            x=0.01,
             font=dict(size=10),
             bgcolor="rgba(0,0,0,0)",
         ),

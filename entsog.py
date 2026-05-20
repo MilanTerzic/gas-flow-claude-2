@@ -1,9 +1,4 @@
-"""
-ENTSOG Transparency Platform fetcher.
-
-Pulls daily Allocation data for the four Serbian import points and returns a
-wide frame in mcm/day, ready to drop into the balance calculation.
-"""
+"""ENTSOG Transparency Platform fetcher for public daily operational flows."""
 
 from __future__ import annotations
 
@@ -14,7 +9,12 @@ from typing import Optional
 import pandas as pd
 import requests
 
-from config import CONVERSION_MCM_TO_KWH, ENTSOG_POINT_DIRECTIONS
+from config import (
+    CONVERSION_MCM_TO_GWH,
+    CONVERSION_MCM_TO_KWH,
+    CONVERSION_MCM_TO_MWH,
+    ENTSOG_POINT_DIRECTIONS,
+)
 
 BASE = "https://transparency.entsog.eu/api/v1"
 
@@ -36,7 +36,7 @@ def _fetch_point(
     start: date,
     end: date,
     token: Optional[str] = None,
-    indicator: str = "Allocation",
+    indicator: str = "Physical Flow",
 ) -> pd.DataFrame:
     headers = {"User-Agent": "serbia-gas-dashboard/1.0"}
     if token:
@@ -54,12 +54,8 @@ def _fetch_point(
             "limit": -1,
         }
         r = requests.get(f"{BASE}/operationaldata", params=params, headers=headers, timeout=60)
-        if r.status_code >= 400:
-            if indicator == "Allocation":
-                params["indicator"] = "Physical Flow"
-                r = requests.get(
-                    f"{BASE}/operationaldata", params=params, headers=headers, timeout=60
-                )
+        if r.status_code == 404:
+            continue
         r.raise_for_status()
         payload = r.json()
         records = (
@@ -74,8 +70,20 @@ def _fetch_point(
     return pd.DataFrame(rows)
 
 
+def _value_to_mcm_per_day(value: float, unit: str) -> float:
+    """Convert ENTSOG daily energy units to mcm/day using the app-wide GCV."""
+    unit_clean = str(unit).lower().replace(" ", "")
+    if "gwh" in unit_clean:
+        return value / CONVERSION_MCM_TO_GWH
+    if "mwh" in unit_clean:
+        return value / CONVERSION_MCM_TO_MWH
+    if "kwh" in unit_clean:
+        return value / CONVERSION_MCM_TO_KWH
+    return value / CONVERSION_MCM_TO_KWH
+
+
 def fetch_flows(start: date, end: date, token: Optional[str] = None) -> pd.DataFrame:
-    """Fetch the four canonical points and return a wide frame in mcm/day."""
+    """Fetch canonical public ENTSOG physical flows and return mcm/day."""
     frames: list[pd.DataFrame] = []
     for canonical, pd_key in ENTSOG_POINT_DIRECTIONS.items():
         raw = _fetch_point(pd_key, start, end, token=token)
@@ -93,21 +101,22 @@ def fetch_flows(start: date, end: date, token: Optional[str] = None) -> pd.DataF
 
         df = pd.DataFrame(
             {
-                "date": pd.to_datetime(raw[period_col], errors="coerce").dt.normalize(),
+                "date": (
+                    pd.to_datetime(raw[period_col], errors="coerce", utc=True)
+                    .dt.tz_convert("Europe/Belgrade")
+                    .dt.tz_localize(None)
+                    .dt.normalize()
+                ),
                 "value": pd.to_numeric(raw[value_col], errors="coerce"),
                 "unit": raw[unit_col].astype(str).str.lower() if unit_col else "kwh/d",
             }
         ).dropna()
 
-        def to_mcm(row):
-            u = str(row["unit"]).lower()
-            v = row["value"]
-            if "mwh" in u:
-                return v / (CONVERSION_MCM_TO_KWH / 1000)
-            return v / CONVERSION_MCM_TO_KWH
-
-        df["mcm_per_day"] = df.apply(to_mcm, axis=1)
-        df = df.groupby("date", as_index=False)["mcm_per_day"].sum()
+        df["mcm_per_day"] = [
+            _value_to_mcm_per_day(value, unit)
+            for value, unit in zip(df["value"], df["unit"])
+        ]
+        df = df.groupby("date", as_index=False)["mcm_per_day"].last()
         df.rename(columns={"mcm_per_day": canonical}, inplace=True)
         frames.append(df)
 

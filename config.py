@@ -54,15 +54,15 @@ CURVE_DISTORTION_DEFAULT = 1.0    # multiplier; 1.0 = no distortion
 POINTS = {
     "kiskundorozsma_hu": "Kiskundorozsma HU (HU→RS)",
     "kireevo":           "Kireevo / Zaychar (BG→RS)",
-    "kiskundorozsma_2":  "Kiskundorozsma 2 (HU exit / RS entry)",
+    "kiskundorozsma_2":  "Kiskundorozsma 2 / Horgos transit",
     "kalotina":          "Kalotina (BG→RS)",
 }
 
 ENTSOG_POINT_DIRECTIONS = {
     "kiskundorozsma_hu": "hu-tso-0001itp-00055exit",
-    "kireevo":           "bg-tso-0001itp-00134exit",
+    "kireevo":           "bg-tso-0001itp-00529exit",
     "kiskundorozsma_2":  "hu-tso-0001itp-10013entry",
-    "kalotina":          "rs-tso-0003itp-00529entry",
+    "kalotina":          "bg-tso-0001itp-00134exit",
 }
 
 

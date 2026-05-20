@@ -141,21 +141,24 @@ def build_balance(
 
     # ---- Flows (already in mcm/day from the flows module) ------------------
     flow_aligned = flow_df.set_index("date").reindex(date_index).fillna(0.0)
+    has_direct_bosnia_transit = "kiskundorozsma_2" in flow_df.columns
     kkd_hu = flow_aligned.get("kiskundorozsma_hu", pd.Series(0.0, index=date_index))
     kireevo = flow_aligned.get("kireevo", pd.Series(0.0, index=date_index))
     kkd_2 = flow_aligned.get("kiskundorozsma_2", pd.Series(0.0, index=date_index))
     kalotina = flow_aligned.get("kalotina", pd.Series(0.0, index=date_index))
+    bosnia_transit = kkd_2.clip(lower=0.0)
+    if not has_direct_bosnia_transit:
+        bosnia_transit = (kireevo * float(bih_share)).clip(lower=0.0)
 
     # ---- Four supply components (no MET / others split) -------------------
+    # kiskundorozsma_hu is the public HU>RS point-direction; if ENTSOG returns
+    # zero, the plotted component remains zero. Kiskundorozsma-2/Horgos is
+    # treated as Bosnia-related transit and deducted from Kireevo.
     df["kalotina_entry_mcm"] = kalotina.values
     df["kiskundorozsma_entry_mcm"] = kkd_hu.values
-    df["imports_from_bulgaria_mcm"] = (kireevo - kkd_2).clip(lower=0.0).values
+    df["bosnia_consumption_mcm"] = bosnia_transit.values
+    df["imports_from_bulgaria_mcm"] = (kireevo - bosnia_transit).clip(lower=0.0).values
     df["domestic_production_mcm"] = float(domestic_production)
-
-    # Bosnia consumption is kept as an informational KPI but is NOT subtracted
-    # from the visible supply stack any more — the user requested the stack
-    # to be exactly: BG + Kalotina + Kiskundorozsma + Production.
-    df["bosnia_consumption_mcm"] = bih_share * df["imports_from_bulgaria_mcm"]
 
     df["serbian_available_supply_mcm"] = (
         df["imports_from_bulgaria_mcm"]

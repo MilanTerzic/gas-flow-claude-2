@@ -94,9 +94,10 @@ with st.sidebar:
 
     use_dummy = st.toggle(
         "Use dummy demonstration data",
-        value=True,
-        help="ON → realistic synthetic data so the dashboard renders without network access.",
+        value=False,
+        help="ON → realistic synthetic data. OFF → fetch public ENTSOG/Open-Meteo data.",
     )
+    show_debug_checks = st.checkbox("Show debug data checks", value=False)
     entsog_token = st.text_input(
         "ENTSOG API token (optional)", type="password",
         help="Public ENTSOG endpoints don't require a token.",
@@ -274,49 +275,50 @@ with tab_balance:
 
     st.markdown("")  # small gap
 
-    with st.expander("Chart data validation", expanded=False):
-        validation_cols = [
-            "date",
-            "imports_from_bulgaria_mcm",
-            "kalotina_entry_mcm",
-            "kiskundorozsma_entry_mcm",
-            "domestic_production_mcm",
-            "stacked_supply_total_mcm",
-            "demand_mcm",
-            "required_actual_mcm",
-            "required_forecast_mcm",
-            "is_forecast",
-        ]
-        around_today = balance_validation["around_today"][validation_cols].copy()
-        around_today["date"] = around_today["date"].dt.strftime("%Y-%m-%d")
-        st.markdown("**Rows around highlighted day**")
-        st.dataframe(around_today, use_container_width=True, hide_index=True)
+    if show_debug_checks:
+        with st.expander("Debug data checks", expanded=False):
+            validation_cols = [
+                "date",
+                "imports_from_bulgaria_mcm",
+                "kalotina_entry_mcm",
+                "kiskundorozsma_entry_mcm",
+                "domestic_production_mcm",
+                "stacked_supply_total_mcm",
+                "demand_mcm",
+                "required_actual_mcm",
+                "required_forecast_mcm",
+                "is_forecast",
+            ]
+            around_today = balance_validation["around_today"][validation_cols].copy()
+            around_today["date"] = around_today["date"].dt.strftime("%Y-%m-%d")
+            st.markdown("**Rows around highlighted day**")
+            st.dataframe(around_today, use_container_width=True, hide_index=True)
 
-        duplicate_dates = balance_validation["duplicate_dates"]
-        hist_fcst_overlap = balance_validation["hist_fcst_overlap"]
-        high_totals = balance_validation["high_totals"]
-        threshold = balance_validation["high_total_threshold"]
+            duplicate_dates = balance_validation["duplicate_dates"]
+            hist_fcst_overlap = balance_validation["hist_fcst_overlap"]
+            high_totals = balance_validation["high_totals"]
+            threshold = balance_validation["high_total_threshold"]
 
-        if duplicate_dates.empty and hist_fcst_overlap.empty:
-            st.success("No duplicate daily rows or historical/forecast demand overlaps detected.")
-        if not duplicate_dates.empty:
-            st.warning("Duplicate dates detected before plotting.")
-            dup_display = duplicate_dates[validation_cols].copy()
-            dup_display["date"] = dup_display["date"].dt.strftime("%Y-%m-%d")
-            st.dataframe(dup_display, use_container_width=True, hide_index=True)
-        if not hist_fcst_overlap.empty:
-            st.warning("Historical and forecast demand both exist on the same date.")
-            overlap_display = hist_fcst_overlap[validation_cols].copy()
-            overlap_display["date"] = overlap_display["date"].dt.strftime("%Y-%m-%d")
-            st.dataframe(overlap_display, use_container_width=True, hide_index=True)
-        if not high_totals.empty:
-            st.warning(
-                "Stacked supply totals exceed the rolling sanity threshold "
-                f"({threshold:.2f} mcm/day)."
-            )
-            high_display = high_totals[validation_cols].copy()
-            high_display["date"] = high_display["date"].dt.strftime("%Y-%m-%d")
-            st.dataframe(high_display, use_container_width=True, hide_index=True)
+            if duplicate_dates.empty and hist_fcst_overlap.empty:
+                st.success("No duplicate daily rows or historical/forecast demand overlaps detected.")
+            if not duplicate_dates.empty:
+                st.warning("Duplicate dates detected before plotting.")
+                dup_display = duplicate_dates[validation_cols].copy()
+                dup_display["date"] = dup_display["date"].dt.strftime("%Y-%m-%d")
+                st.dataframe(dup_display, use_container_width=True, hide_index=True)
+            if not hist_fcst_overlap.empty:
+                st.warning("Historical and forecast demand both exist on the same date.")
+                overlap_display = hist_fcst_overlap[validation_cols].copy()
+                overlap_display["date"] = overlap_display["date"].dt.strftime("%Y-%m-%d")
+                st.dataframe(overlap_display, use_container_width=True, hide_index=True)
+            if not high_totals.empty:
+                st.warning(
+                    "Stacked supply totals exceed the rolling sanity threshold "
+                    f"({threshold:.2f} mcm/day)."
+                )
+                high_display = high_totals[validation_cols].copy()
+                high_display["date"] = high_display["date"].dt.strftime("%Y-%m-%d")
+                st.dataframe(high_display, use_container_width=True, hide_index=True)
 
     # ---- Three compact, vertically-aligned charts -------------------------
     st.markdown("### Daily composition of Serbia demand")
