@@ -39,6 +39,14 @@ import numpy as np
 import pandas as pd
 
 
+SUPPLY_COMPONENT_COLUMNS = [
+    "imports_from_bulgaria_mcm",
+    "kalotina_entry_mcm",
+    "kiskundorozsma_entry_mcm",
+    "domestic_production_mcm",
+]
+
+
 def forecast_demand(
     temperature_c: pd.Series,
     poly_coeffs: Sequence[float],
@@ -62,6 +70,24 @@ def rolling_avg_temperature(temp_series: pd.Series, window: int = 2) -> pd.Serie
     return temp_series.rolling(window=window, min_periods=1).mean()
 
 
+def _normalize_daily_index(date_index: pd.DatetimeIndex) -> pd.DatetimeIndex:
+    """Return one sorted midnight timestamp per dashboard date."""
+    return (
+        pd.DatetimeIndex(pd.to_datetime(date_index))
+        .normalize()
+        .drop_duplicates()
+        .sort_values()
+    )
+
+
+def _one_row_per_date(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize dates and keep one complete daily row if sources overlap."""
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"]).dt.normalize()
+    out = out.sort_values("date")
+    return out.groupby("date", as_index=False).last()
+
+
 def build_balance(
     date_index: pd.DatetimeIndex,
     today_ts: pd.Timestamp,
@@ -82,6 +108,11 @@ def build_balance(
     rows live in one continuous frame with no gaps. Historical vs forecast
     is decided by ``is_forecast = date > today_ts``.
     """
+    date_index = _normalize_daily_index(date_index)
+    today_ts = pd.Timestamp(today_ts).normalize()
+    temp_df = _one_row_per_date(temp_df)
+    flow_df = _one_row_per_date(flow_df)
+
     df = pd.DataFrame({"date": date_index})
 
     # ---- Temperature (single column actual+forecast; we split for plotting) --
@@ -135,3 +166,59 @@ def build_balance(
     df["storage_imbalance_mcm"] = df["serbian_available_supply_mcm"] - df["demand_mcm"]
 
     return df
+
+
+def validate_balance_for_plot(
+    df: pd.DataFrame,
+    today_ts: pd.Timestamp,
+    high_total_multiplier: float = 1.6,
+    lookaround_days: int = 3,
+) -> dict:
+    """
+    Return lightweight diagnostics for the Streamlit debug panel.
+
+    The chart is daily and wide, so each date should appear once and each
+    row should belong to either the historical or forecast side, never both.
+    """
+    check = df.copy()
+    check["date"] = pd.to_datetime(check["date"]).dt.normalize()
+    today_ts = pd.Timestamp(today_ts).normalize()
+
+    components = [c for c in SUPPLY_COMPONENT_COLUMNS if c in check.columns]
+    check["stacked_supply_total_mcm"] = check[components].sum(axis=1)
+
+    duplicate_dates = (
+        check[check["date"].duplicated(keep=False)]
+        .sort_values("date")
+        .copy()
+    )
+    hist_fcst_overlap = check[
+        check["required_actual_mcm"].notna()
+        & check["required_forecast_mcm"].notna()
+    ].copy()
+
+    median_total = check["stacked_supply_total_mcm"].median()
+    if pd.isna(median_total) or median_total <= 0:
+        high_total_threshold = np.nan
+        high_totals = check.iloc[0:0].copy()
+    else:
+        high_total_threshold = float(median_total * high_total_multiplier)
+        high_totals = check[
+            check["stacked_supply_total_mcm"] > high_total_threshold
+        ].copy()
+
+    around_today = check[
+        check["date"].between(
+            today_ts - pd.Timedelta(days=lookaround_days),
+            today_ts + pd.Timedelta(days=lookaround_days),
+        )
+    ].copy()
+
+    return {
+        "components": components,
+        "around_today": around_today,
+        "duplicate_dates": duplicate_dates,
+        "hist_fcst_overlap": hist_fcst_overlap,
+        "high_totals": high_totals,
+        "high_total_threshold": high_total_threshold,
+    }

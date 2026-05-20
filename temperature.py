@@ -162,8 +162,8 @@ def align(temp_df: pd.DataFrame, date_index: pd.DatetimeIndex) -> pd.DataFrame:
     """Reindex onto the dashboard date range and interpolate small gaps."""
     df = temp_df.copy()
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-    df = df.drop_duplicates(subset="date").sort_values("date")
-    df = df.set_index("date").reindex(date_index)
+    df = df.sort_values("date").groupby("date", as_index=False).last()
+    df = df.set_index("date").reindex(pd.DatetimeIndex(date_index).normalize())
     df["temperature_c"] = df["temperature_c"].astype(float)
     df["temperature_c"] = df["temperature_c"].interpolate(method="linear").ffill().bfill()
     out = df.reset_index().rename(columns={"index": "date"})

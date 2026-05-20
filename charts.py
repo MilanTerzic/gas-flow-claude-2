@@ -17,7 +17,7 @@ Style targets
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -41,7 +41,7 @@ from config import (
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-DEFAULT_MARGIN = dict(l=50, r=20, t=40, b=35)
+DEFAULT_MARGIN = dict(l=50, r=20, t=50, b=35)
 
 
 def _today_band(fig: go.Figure, today: pd.Timestamp) -> None:
@@ -59,23 +59,38 @@ def _today_band(fig: go.Figure, today: pd.Timestamp) -> None:
 
 def _apply_common_layout(
     fig: go.Figure,
-    title: str,
+    title: Optional[str],
     y_title: str,
     height: int,
     show_legend: bool = True,
 ) -> None:
+    layout_title = None
+    margin = DEFAULT_MARGIN.copy()
+    legend_y = 1.02
+    if title:
+        layout_title = dict(
+            text=title,
+            x=0.0,
+            xanchor="left",
+            y=0.98,
+            yanchor="top",
+            font=dict(size=14),
+        )
+        margin["t"] = 80
+        legend_y = 1.12
+
     fig.update_layout(
-        title=dict(text=title, x=0.0, xanchor="left", font=dict(size=14)),
+        title=layout_title,
         template="plotly_white",
         plot_bgcolor="white",
         paper_bgcolor="white",
         height=height,
-        margin=DEFAULT_MARGIN,
+        margin=margin,
         showlegend=show_legend,
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=1.02,
+            y=legend_y,
             xanchor="left",
             x=0.0,
             font=dict(size=10),
@@ -150,13 +165,6 @@ def plot_gas_balance_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
         hist_y = df[col].where(is_hist)
         fcst_y = df[col].where(~is_hist)
 
-        # Bridge: copy the value at the boundary date into the forecast series
-        # so the stacked area joins smoothly across today.
-        if has_fcst and is_hist.any():
-            last_hist_idx = df.index[is_hist][-1]
-            fcst_y = fcst_y.copy()
-            fcst_y.loc[last_hist_idx] = df.loc[last_hist_idx, col]
-
         # Historical area — solid
         fig.add_trace(
             go.Scatter(
@@ -225,7 +233,7 @@ def plot_gas_balance_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
     _today_band(fig, today)
     _apply_common_layout(
         fig,
-        title="Daily composition of Serbia demand",
+        title=None,
         y_title="mcm/day",
         height=360,
     )
@@ -287,7 +295,7 @@ def plot_temperature_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
     _today_band(fig, today)
     _apply_common_layout(
         fig,
-        title="Belgrade temperature (°C)",
+        title=None,
         y_title="°C",
         height=200,
     )
@@ -362,7 +370,7 @@ def plot_storage_chart(df: pd.DataFrame, today: pd.Timestamp) -> go.Figure:
     _today_band(fig, today)
     _apply_common_layout(
         fig,
-        title="Storage +/-",
+        title=None,
         y_title="mcm/day",
         height=220,
         show_legend=False,

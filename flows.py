@@ -101,6 +101,7 @@ def align(flow_df: pd.DataFrame, date_index: pd.DatetimeIndex) -> pd.DataFrame:
     """Reindex flow data onto the master date_index, filling gaps with 0."""
     df = flow_df.copy()
     df["date"] = pd.to_datetime(df["date"]).dt.normalize()
-    df = df.drop_duplicates(subset="date").set_index("date").reindex(date_index)
+    df = df.sort_values("date").groupby("date", as_index=False).last()
+    df = df.set_index("date").reindex(pd.DatetimeIndex(date_index).normalize())
     df = df.fillna(0.0)
     return df.reset_index().rename(columns={"index": "date"})
