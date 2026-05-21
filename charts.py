@@ -596,9 +596,10 @@ def plot_offered_vs_booked_chart(cap_df: pd.DataFrame) -> go.Figure:
         _apply_common_layout(fig, "Offered vs booked capacity", "MWh/day", 340)
         return fig
     grouped = (
-        cap_df.groupby("border_point_short", as_index=False)
+        cap_df.groupby(["tso", "border_point_short"], as_index=False)
         .agg(offered_mwh=("offered_mwh", "sum"), booked_mwh=("booked_mwh", "sum"))
     )
+    grouped["point_label"] = grouped["border_point_short"].astype(str) + " (" + grouped["tso"].astype(str) + ")"
     grouped["booked_pct"] = np.where(
         grouped["offered_mwh"] > 0,
         grouped["booked_mwh"] / grouped["offered_mwh"] * 100.0,
@@ -607,7 +608,7 @@ def plot_offered_vs_booked_chart(cap_df: pd.DataFrame) -> go.Figure:
     for col, label in [("offered_mwh", "Offered"), ("booked_mwh", "Booked")]:
         fig.add_trace(
             go.Bar(
-                x=grouped["border_point_short"],
+                x=grouped["point_label"],
                 y=grouped[col],
                 name=label,
                 customdata=np.stack([grouped["booked_pct"].to_numpy()], axis=-1),
@@ -742,12 +743,11 @@ def plot_capacity_booked_chart(cap_df: pd.DataFrame, chart_type: str = "Line cha
 
     grouped = (
         cap_df.sort_values("delivery_sort")
-        .groupby(["delivery_period", "delivery_sort", "border_point_short"], as_index=False)
+        .groupby(["delivery_period", "delivery_sort", "tso", "border_point_short"], as_index=False)
         .agg(
             booked_mwh=("booked_mwh", "sum"),
             offered_mwh=("offered_mwh", "sum"),
             utilisation_pct=("utilisation_pct", "mean"),
-            tso=("tso", "first"),
             border_point_full=("border_point_full", "first"),
             direction=("direction", "first"),
             product_level=("product_level", lambda s: ", ".join(sorted(set(map(str, s))))),
@@ -764,15 +764,16 @@ def plot_capacity_booked_chart(cap_df: pd.DataFrame, chart_type: str = "Line cha
         )
     )
 
-    for bp in sorted(grouped["border_point_short"].dropna().unique()):
-        sub = grouped[grouped["border_point_short"] == bp].sort_values("delivery_sort")
+    grouped["legend_label"] = grouped["border_point_short"].astype(str) + " (" + grouped["tso"].astype(str) + ")"
+    for label in sorted(grouped["legend_label"].dropna().unique()):
+        sub = grouped[grouped["legend_label"] == label].sort_values("delivery_sort")
         if chart_type == "Grouped bar chart":
             fig.add_trace(
                 go.Bar(
                     x=sub["delivery_period"],
                     y=sub["booked_mwh"],
                     customdata=_capacity_hover_data(sub),
-                    name=str(bp),
+                    name=str(label),
                     hovertemplate=CAPACITY_HOVER_TEMPLATE,
                 )
             )
@@ -782,7 +783,7 @@ def plot_capacity_booked_chart(cap_df: pd.DataFrame, chart_type: str = "Line cha
                     x=sub["delivery_period"],
                     y=sub["booked_mwh"],
                     customdata=_capacity_hover_data(sub),
-                    name=str(bp),
+                    name=str(label),
                     mode="lines+markers",
                     fill="tonexty" if chart_type == "Stacked area chart" else None,
                     stackgroup="booked" if chart_type == "Stacked area chart" else None,
@@ -835,14 +836,15 @@ def plot_capacity_price_chart(cap_df: pd.DataFrame) -> go.Figure:
     if sub.empty:
         _apply_common_layout(fig, "Price by product level and border point", "EUR/MWh", 320)
         return fig
-    for bp in sorted(sub["border_point_short"].dropna().unique()):
-        ssub = sub[sub["border_point_short"] == bp].sort_values("delivery_sort")
+    sub["legend_label"] = sub["border_point_short"].astype(str) + " (" + sub["tso"].astype(str) + ")"
+    for label in sorted(sub["legend_label"].dropna().unique()):
+        ssub = sub[sub["legend_label"] == label].sort_values("delivery_sort")
         fig.add_trace(
             go.Scatter(
                 x=ssub["delivery_period"],
                 y=ssub["price_eur_per_mwh"],
                 customdata=_capacity_hover_data(ssub),
-                name=str(bp),
+                name=str(label),
                 mode="lines+markers",
                 hovertemplate=CAPACITY_HOVER_TEMPLATE,
             )

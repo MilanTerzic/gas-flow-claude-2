@@ -581,10 +581,6 @@ with tab_capacity:
             config={"displayModeBar": False},
         )
 
-    st.markdown("### Bookings table")
-    grouped = capacity.format_table(cap_view)
-    st.dataframe(grouped, use_container_width=True, hide_index=True)
-
     with st.expander("Additional capacity views"):
         st.plotly_chart(
             charts.plot_offered_vs_booked_chart(cap_view),
@@ -597,43 +593,9 @@ with tab_capacity:
             config={"displayModeBar": False},
         )
 
-    """
-    # Two charts side by side
-    c1, c2 = st.columns(2)
-    with c1:
-        st.plotly_chart(
-            charts.plot_capacity_booked_chart(cap_view),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-    with c2:
-        st.plotly_chart(
-            charts.plot_capacity_utilisation_chart(cap_view),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-
-    # Prices — separate HUF / EUR
-    st.markdown("**Price comparison** — HUF and EUR shown separately (different magnitudes)")
-    huf_fig, eur_fig = None, charts.plot_capacity_price_chart(cap_view)
-    pc1, pc2 = st.columns(2)
-    with pc1:
-        if huf_fig is not None:
-            st.plotly_chart(huf_fig, use_container_width=True, config={"displayModeBar": False})
-        else:
-            st.info("No HUF-priced bookings in current filter.")
-    with pc2:
-        if eur_fig is not None:
-            st.plotly_chart(eur_fig, use_container_width=True, config={"displayModeBar": False})
-        else:
-            st.info("No EUR-priced bookings in current filter.")
-
-    st.plotly_chart(
-        charts.plot_offered_vs_booked_chart(cap_view),
-        use_container_width=True,
-        config={"displayModeBar": False},
-    )
-    """
+    st.markdown("### Bookings table")
+    grouped = capacity.format_table(cap_view)
+    st.dataframe(grouped, use_container_width=True, hide_index=True)
 
     with st.expander("Raw capacity data"):
         st.dataframe(cap_view, use_container_width=True, hide_index=True)
