@@ -6,6 +6,8 @@ workbook actually shows for Serbian flows.
 
 from __future__ import annotations
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 
@@ -53,7 +55,15 @@ def capacity_bookings() -> pd.DataFrame:
     """Synthetic capacity bookings covering all TSO × point × period combinations."""
     rng = np.random.default_rng(seed=11)
     rows: list[dict] = []
-    periods = ["Day", "D-1", "D-2", "D-3", "D-4"]
+    today = pd.Timestamp(date.today()).normalize()
+    product_periods = {
+        "daily": [(today + pd.Timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(-2, 3)],
+        "monthly": [(today + pd.DateOffset(months=offset)).strftime("%b %Y") for offset in range(0, 5)],
+        "quarterly": [
+            f"Q{((today.month - 1) // 3 + offset) % 4 + 1} {today.year + ((today.month - 1) // 3 + offset) // 4}"
+            for offset in range(0, 5)
+        ],
+    }
 
     offered_baseline = {
         "FGSZ_exit": 105_000,
@@ -76,7 +86,7 @@ def capacity_bookings() -> pd.DataFrame:
     for d in CAPACITY_DEFS:
         offered = lookup(d)
         for product in ["daily", "monthly", "quarterly"]:
-            for period in periods:
+            for period in product_periods[product]:
                 booked = offered * float(rng.uniform(0.45, 0.95))
                 if d["currency"] == "HUF":
                     price = float(rng.uniform(0.0015, 0.0040))
@@ -94,6 +104,7 @@ def capacity_bookings() -> pd.DataFrame:
                         "utilisation_pct": round(booked / offered * 100, 1),
                         "price": price,
                         "currency": d["currency"],
+                        "price_unit": d["price_unit"],
                         "pct_of_100": round(booked / offered * 100, 1),
                     }
                 )
