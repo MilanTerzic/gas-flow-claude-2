@@ -530,3 +530,323 @@ def plot_capacity_price_chart(cap_df: pd.DataFrame) -> Tuple[go.Figure, go.Figur
         fig.update_xaxes(tickangle=-30)
         figs[ccy] = fig
     return figs.get("HUF"), figs.get("EUR")
+
+
+# New ENTSOG capacity booking charts. These definitions intentionally override
+# the legacy compact charts above while keeping older imports stable.
+def _capacity_hover_fields(cap_df: pd.DataFrame) -> np.ndarray:
+    fields = [
+        cap_df.get("border_point_full", pd.Series("", index=cap_df.index)),
+        cap_df.get("tso", pd.Series("", index=cap_df.index)),
+        cap_df.get("direction", pd.Series("", index=cap_df.index)),
+        cap_df.get("offered_mwh", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("booked_mwh", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("utilisation_pct", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("price_original", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_unit_detected", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_eur_per_mwh", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("price_conversion_note", pd.Series("", index=cap_df.index)),
+        cap_df.get("fx_rate_to_eur", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("fx_rate_date", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_currency", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_converted_eur", pd.Series(np.nan, index=cap_df.index)),
+    ]
+    return np.stack([s.to_numpy() for s in fields], axis=-1)
+
+
+def plot_capacity_booked_chart(cap_df: pd.DataFrame) -> go.Figure:
+    """Booked capacity by delivery period, color-coded by short border point."""
+    fig = go.Figure()
+    if cap_df.empty:
+        _apply_common_layout(fig, "Booked capacity by delivery period", "MWh/day", 360)
+        return fig
+    for bp in sorted(cap_df["border_point_short"].dropna().unique()):
+        sub = cap_df[cap_df["border_point_short"] == bp].sort_values("delivery_sort")
+        fig.add_trace(
+            go.Scatter(
+                x=sub["delivery_period"],
+                y=sub["booked_mwh"],
+                customdata=_capacity_hover_fields(sub),
+                name=str(bp),
+                mode="lines+markers",
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Period: %{x}<br>"
+                    "TSO: %{customdata[1]}<br>"
+                    "Type: %{customdata[2]}<br>"
+                    "Offered: %{customdata[3]:,.0f} MWh/day<br>"
+                    "Booked: %{customdata[4]:,.0f} MWh/day<br>"
+                    "Booked %%: %{customdata[5]:.1f}<br>"
+                    "Original price: %{customdata[6]} %{customdata[7]}<br>"
+                    "FX to EUR: %{customdata[10]:.6f} (%{customdata[11]})<br>"
+                    "EUR/MWh: %{customdata[8]:.4f}<br>"
+                    "%{customdata[9]}<extra></extra>"
+                ),
+            )
+        )
+    _apply_common_layout(fig, "Booked capacity by delivery period", "MWh/day", 360)
+    fig.update_xaxes(tickangle=-30)
+    return fig
+
+
+def plot_offered_vs_booked_chart(cap_df: pd.DataFrame) -> go.Figure:
+    """Grouped offered vs booked capacity by border point."""
+    fig = go.Figure()
+    if cap_df.empty:
+        _apply_common_layout(fig, "Offered vs booked capacity", "MWh/day", 340)
+        return fig
+    grouped = (
+        cap_df.groupby("border_point_short", as_index=False)
+        .agg(offered_mwh=("offered_mwh", "sum"), booked_mwh=("booked_mwh", "sum"))
+    )
+    grouped["booked_pct"] = np.where(
+        grouped["offered_mwh"] > 0,
+        grouped["booked_mwh"] / grouped["offered_mwh"] * 100.0,
+        np.nan,
+    )
+    for col, label in [("offered_mwh", "Offered"), ("booked_mwh", "Booked")]:
+        fig.add_trace(
+            go.Bar(
+                x=grouped["border_point_short"],
+                y=grouped[col],
+                name=label,
+                customdata=np.stack([grouped["booked_pct"].to_numpy()], axis=-1),
+                hovertemplate="%{x}<br>" + label + ": %{y:,.0f} MWh/day<br>Booked: %{customdata[0]:.1f}%<extra></extra>",
+            )
+        )
+    fig.update_layout(barmode="group")
+    _apply_common_layout(fig, "Offered vs booked capacity", "MWh/day", 340)
+    fig.update_xaxes(tickangle=-25)
+    return fig
+
+
+def plot_capacity_utilisation_chart(cap_df: pd.DataFrame) -> go.Figure:
+    """Booking utilization heatmap by border point and delivery period."""
+    fig = go.Figure()
+    if cap_df.empty:
+        _apply_common_layout(fig, "Booking utilization heatmap", "%", 340, show_legend=False)
+        return fig
+    pivot = cap_df.pivot_table(
+        index="border_point_short",
+        columns="delivery_period",
+        values="utilisation_pct",
+        aggfunc="mean",
+    )
+    ordered_cols = (
+        cap_df[["delivery_period", "delivery_sort"]]
+        .drop_duplicates()
+        .sort_values("delivery_sort")["delivery_period"]
+        .tolist()
+    )
+    pivot = pivot.reindex(columns=[c for c in ordered_cols if c in pivot.columns])
+    fig.add_trace(
+        go.Heatmap(
+            z=pivot.to_numpy(),
+            x=pivot.columns.tolist(),
+            y=pivot.index.tolist(),
+            colorscale="RdYlGn",
+            zmin=0,
+            zmax=100,
+            colorbar=dict(title="%"),
+            hovertemplate="Border point: %{y}<br>Period: %{x}<br>Booked: %{z:.1f}%<extra></extra>",
+        )
+    )
+    _apply_common_layout(fig, "Booking utilization heatmap", "%", 340, show_legend=False)
+    fig.update_xaxes(tickangle=-30)
+    return fig
+
+
+def plot_capacity_price_chart(cap_df: pd.DataFrame) -> go.Figure:
+    """Converted EUR/MWh price comparison by delivery period."""
+    fig = go.Figure()
+    sub = cap_df[cap_df["price_eur_per_mwh"].notna()].copy()
+    if sub.empty:
+        _apply_common_layout(fig, "Converted price comparison", "EUR/MWh", 320)
+        return fig
+    for bp in sorted(sub["border_point_short"].dropna().unique()):
+        ssub = sub[sub["border_point_short"] == bp].sort_values("delivery_sort")
+        fig.add_trace(
+            go.Scatter(
+                x=ssub["delivery_period"],
+                y=ssub["price_eur_per_mwh"],
+                customdata=_capacity_hover_fields(ssub),
+                name=str(bp),
+                mode="lines+markers",
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Period: %{x}<br>"
+                    "Original price: %{customdata[6]} %{customdata[12]} %{customdata[7]}<br>"
+                    "FX to EUR: %{customdata[10]:.6f} (%{customdata[11]})<br>"
+                    "Price in EUR: %{customdata[13]:.6f}<br>"
+                    "EUR/MWh: %{y:.4f}<br>"
+                    "%{customdata[9]}<extra></extra>"
+                ),
+            )
+        )
+    _apply_common_layout(fig, "Converted price comparison", "EUR/MWh", 320)
+    fig.update_xaxes(tickangle=-30)
+    return fig
+
+
+def _capacity_hover_data(cap_df: pd.DataFrame) -> np.ndarray:
+    fields = [
+        cap_df.get("tso", pd.Series("", index=cap_df.index)),
+        cap_df.get("border_point_full", pd.Series("", index=cap_df.index)),
+        cap_df.get("border_point_short", pd.Series("", index=cap_df.index)),
+        cap_df.get("direction", pd.Series("", index=cap_df.index)),
+        cap_df.get("product_level", pd.Series("", index=cap_df.index)),
+        cap_df.get("delivery_period", pd.Series("", index=cap_df.index)),
+        cap_df.get("period_start", pd.Series("", index=cap_df.index)),
+        cap_df.get("period_end", pd.Series("", index=cap_df.index)),
+        cap_df.get("period_days", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("offered_mwh", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("booked_mwh", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("utilisation_pct", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("price_original", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_currency", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_unit_detected", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_eur_per_mwh", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("fx_rate_to_eur", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("fx_rate_date", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_conversion_note", pd.Series("", index=cap_df.index)),
+    ]
+    return np.stack([s.astype(str).to_numpy() for s in fields], axis=-1)
+
+
+CAPACITY_HOVER_TEMPLATE = (
+    "TSO: %{customdata[0]}<br>"
+    "Full point: %{customdata[1]}<br>"
+    "Short point: %{customdata[2]}<br>"
+    "Type: %{customdata[3]}<br>"
+    "Product: %{customdata[4]}<br>"
+    "Period: %{customdata[5]}<br>"
+    "Start: %{customdata[6]}<br>"
+    "End: %{customdata[7]}<br>"
+    "Days: %{customdata[8]}<br>"
+    "Offered: %{customdata[9]} MWh/day<br>"
+    "Booked: %{customdata[10]} MWh/day<br>"
+    "Booked %%: %{customdata[11]}<br>"
+    "Original price: %{customdata[12]} %{customdata[13]} %{customdata[14]}<br>"
+    "EUR/MWh: %{customdata[15]}<br>"
+    "FX: %{customdata[16]} (%{customdata[17]})<br>"
+    "%{customdata[18]}<extra></extra>"
+)
+
+
+def plot_capacity_booked_chart(cap_df: pd.DataFrame, chart_type: str = "Line chart") -> go.Figure:
+    """Booked capacity by delivery period, color-coded by short border point."""
+    fig = go.Figure()
+    if cap_df.empty:
+        _apply_common_layout(fig, "Booked capacity by delivery period", "MWh/day", 360)
+        return fig
+
+    grouped = (
+        cap_df.sort_values("delivery_sort")
+        .groupby(["delivery_period", "delivery_sort", "border_point_short"], as_index=False)
+        .agg(
+            booked_mwh=("booked_mwh", "sum"),
+            offered_mwh=("offered_mwh", "sum"),
+            utilisation_pct=("utilisation_pct", "mean"),
+            tso=("tso", "first"),
+            border_point_full=("border_point_full", "first"),
+            direction=("direction", "first"),
+            product_level=("product_level", lambda s: ", ".join(sorted(set(map(str, s))))),
+            period_start=("period_start", "first"),
+            period_end=("period_end", "first"),
+            period_days=("period_days", "first"),
+            price_original=("price_original", "first"),
+            price_currency=("price_currency", "first"),
+            price_unit_detected=("price_unit_detected", "first"),
+            price_eur_per_mwh=("price_eur_per_mwh", "first"),
+            fx_rate_to_eur=("fx_rate_to_eur", "first"),
+            fx_rate_date=("fx_rate_date", "first"),
+            price_conversion_note=("price_conversion_note", "first"),
+        )
+    )
+
+    for bp in sorted(grouped["border_point_short"].dropna().unique()):
+        sub = grouped[grouped["border_point_short"] == bp].sort_values("delivery_sort")
+        if chart_type == "Grouped bar chart":
+            fig.add_trace(
+                go.Bar(
+                    x=sub["delivery_period"],
+                    y=sub["booked_mwh"],
+                    customdata=_capacity_hover_data(sub),
+                    name=str(bp),
+                    hovertemplate=CAPACITY_HOVER_TEMPLATE,
+                )
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["delivery_period"],
+                    y=sub["booked_mwh"],
+                    customdata=_capacity_hover_data(sub),
+                    name=str(bp),
+                    mode="lines+markers",
+                    fill="tonexty" if chart_type == "Stacked area chart" else None,
+                    stackgroup="booked" if chart_type == "Stacked area chart" else None,
+                    hovertemplate=CAPACITY_HOVER_TEMPLATE,
+                )
+            )
+    if chart_type == "Grouped bar chart":
+        fig.update_layout(barmode="group")
+    _apply_common_layout(fig, "Booked capacity by delivery period", "MWh/day", 380)
+    fig.update_xaxes(tickangle=-30)
+    return fig
+
+
+def plot_capacity_product_level_chart(cap_df: pd.DataFrame) -> go.Figure:
+    """Stacked area chart of booked capacity split by product level."""
+    fig = go.Figure()
+    if cap_df.empty:
+        _apply_common_layout(fig, "Booked capacity by product level", "MWh/day", 320)
+        return fig
+    grouped = (
+        cap_df.sort_values("delivery_sort")
+        .groupby(["delivery_period", "delivery_sort", "product_level"], as_index=False)["booked_mwh"]
+        .sum()
+    )
+    product_order = ["Daily", "Monthly", "Quarterly", "Annual", "Day-ahead", "Within-day", "Unknown"]
+    for product in [p for p in product_order if p in set(grouped["product_level"])]:
+        sub = grouped[grouped["product_level"] == product].sort_values("delivery_sort")
+        fig.add_trace(
+            go.Scatter(
+                x=sub["delivery_period"],
+                y=sub["booked_mwh"],
+                name=product,
+                mode="lines",
+                stackgroup="product",
+                hovertemplate=f"{product}<br>Period: %{{x}}<br>Booked: %{{y:,.0f}} MWh/day<extra></extra>",
+            )
+        )
+    _apply_common_layout(fig, "Booked capacity by product level", "MWh/day", 320)
+    fig.update_xaxes(tickangle=-30)
+    return fig
+
+
+def plot_capacity_price_chart(cap_df: pd.DataFrame) -> go.Figure:
+    """Converted EUR/MWh price comparison for successful conversions only."""
+    fig = go.Figure()
+    sub = cap_df[
+        cap_df["price_eur_per_mwh"].notna()
+        & (cap_df.get("price_conversion_status", "success") == "success")
+    ].copy()
+    if sub.empty:
+        _apply_common_layout(fig, "Price by product level and border point", "EUR/MWh", 320)
+        return fig
+    for bp in sorted(sub["border_point_short"].dropna().unique()):
+        ssub = sub[sub["border_point_short"] == bp].sort_values("delivery_sort")
+        fig.add_trace(
+            go.Scatter(
+                x=ssub["delivery_period"],
+                y=ssub["price_eur_per_mwh"],
+                customdata=_capacity_hover_data(ssub),
+                name=str(bp),
+                mode="lines+markers",
+                hovertemplate=CAPACITY_HOVER_TEMPLATE,
+            )
+        )
+    _apply_common_layout(fig, "Price by product level and border point", "EUR/MWh", 320)
+    fig.update_xaxes(tickangle=-30)
+    return fig
