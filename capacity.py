@@ -34,8 +34,26 @@ COLUMN_ALIASES = {
     "direction": ["type", "direction", "entry/exit"],
     "product": ["product", "product type", "runtime period"],
     "period": ["period", "delivery period", "gas day", "date"],
-    "offered_mwh": ["offered (mwh/day)", "offered", "offered_mwh", "offered capacity", "offered_capacity_mwh_day"],
-    "booked_mwh": ["booked (mwh/day)", "booked", "booked_mwh", "booked capacity", "booked_capacity_mwh_day"],
+    "offered_mwh": [
+        "offered (mwh/day)",
+        "offered (mwh/d)",
+        "offered (kwh/h)",
+        "offered (kwh/day)",
+        "offered",
+        "offered_mwh",
+        "offered capacity",
+        "offered_capacity_mwh_day",
+    ],
+    "booked_mwh": [
+        "booked (mwh/day)",
+        "booked (mwh/d)",
+        "booked (kwh/h)",
+        "booked (kwh/day)",
+        "booked",
+        "booked_mwh",
+        "booked capacity",
+        "booked_capacity_mwh_day",
+    ],
     "utilisation_pct": ["booked %", "booked%", "utilisation_pct", "utilization_pct", "utilisation"],
     "price": ["price", "reserve price", "tariff"],
     "currency": ["currency", "ccy"],
@@ -57,6 +75,43 @@ def _first_present(df: pd.DataFrame, aliases: list[str]) -> Optional[str]:
     return None
 
 
+def empty_capacity_frame() -> pd.DataFrame:
+    columns = [
+        "tso",
+        "border_point",
+        "border_point_full",
+        "border_point_short",
+        "direction",
+        "type",
+        "product",
+        "product_type",
+        "product_level",
+        "period",
+        "delivery_period",
+        "delivery_start",
+        "delivery_end",
+        "delivery_sort",
+        "period_start",
+        "period_end",
+        "period_days",
+        "offered_mwh",
+        "booked_mwh",
+        "utilisation_pct",
+        "offered_capacity_mwh_day",
+        "booked_capacity_mwh_day",
+        "booked_percentage",
+        "price_original",
+        "price_currency",
+        "price_unit_detected",
+        "price_eur_per_mwh",
+        "booked_energy_mwh_for_period",
+        "data_quality_warning",
+        "has_quality_warning",
+        "source_retrieval_date",
+    ]
+    return pd.DataFrame(columns=columns)
+
+
 def _to_number(value: Any) -> float:
     if pd.isna(value):
         return np.nan
@@ -70,6 +125,21 @@ def _to_number(value: Any) -> float:
         text = text.replace(",", ".")
     match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text)
     return float(match.group(0)) if match else np.nan
+
+
+def _capacity_to_mwh_day(value: Any, source_col: Optional[str]) -> float:
+    numeric = _to_number(value)
+    if pd.isna(numeric):
+        return np.nan
+    unit = _clean_key(source_col or "")
+    unit = unit.replace(" ", "")
+    if "kwh/h" in unit or "kwhperh" in unit:
+        return numeric * 0.024
+    if "kwh/day" in unit or "kwh/d" in unit:
+        return numeric / 1000.0
+    if "gwh/day" in unit or "gwh/d" in unit:
+        return numeric * 1000.0
+    return numeric
 
 
 def _parse_date(value: Any) -> pd.Timestamp:
@@ -457,6 +527,8 @@ def plotted_series_validation_table(df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             offered_capacity_mwh_day=("offered_mwh", "sum"),
             booked_capacity_mwh_day=("booked_mwh", "sum"),
+            offered_source_column=("offered_source_column", "first"),
+            booked_source_column=("booked_source_column", "first"),
             original_unit=("price_unit_detected", lambda s: ", ".join(sorted({str(v) for v in s if str(v).strip()}))),
             converted_unit=("price_conversion_status", lambda s: "EUR/MWh" if (s == "success").any() else ""),
             source_timestamp=("source_retrieval_date", lambda s: ", ".join(sorted({str(v) for v in s if str(v).strip()}))),
@@ -478,6 +550,8 @@ def plotted_series_validation_table(df: pd.DataFrame) -> pd.DataFrame:
             "delivery_period",
             "offered_capacity_mwh_day",
             "booked_capacity_mwh_day",
+            "offered_source_column",
+            "booked_source_column",
             "original_unit",
             "converted_unit",
             "source_timestamp",
@@ -487,9 +561,13 @@ def plotted_series_validation_table(df: pd.DataFrame) -> pd.DataFrame:
 
 def prepare_chart_data(df: pd.DataFrame, fx_rates: Optional[dict[str, Any]] = None) -> pd.DataFrame:
     """Return normalized capacity booking rows ready for tables and charts."""
+    if df is None or df.empty:
+        return empty_capacity_frame()
     out = pd.DataFrame()
+    source_cols: dict[str, Optional[str]] = {}
     for target, aliases in COLUMN_ALIASES.items():
         src = _first_present(df, aliases)
+        source_cols[target] = src
         out[target] = df[src] if src else np.nan
 
     out["tso"] = out["tso"].fillna("").astype(str).str.strip()
@@ -499,8 +577,16 @@ def prepare_chart_data(df: pd.DataFrame, fx_rates: Optional[dict[str, Any]] = No
     out["product"] = out["product"].fillna("").astype(str).str.strip()
     out["period"] = out["period"].fillna("").astype(str).str.strip()
     out["source_timestamp"] = out["source_timestamp"].fillna("").astype(str).str.strip()
-    out["offered_mwh"] = out["offered_mwh"].map(_to_number)
-    out["booked_mwh"] = out["booked_mwh"].map(_to_number)
+    out["offered_source_column"] = source_cols.get("offered_mwh") or ""
+    out["booked_source_column"] = source_cols.get("booked_mwh") or ""
+    out["offered_mwh"] = [
+        _capacity_to_mwh_day(value, source_cols.get("offered_mwh"))
+        for value in out["offered_mwh"]
+    ]
+    out["booked_mwh"] = [
+        _capacity_to_mwh_day(value, source_cols.get("booked_mwh"))
+        for value in out["booked_mwh"]
+    ]
     out["utilisation_pct"] = out["utilisation_pct"].map(_to_number)
     out["pct_of_100"] = out["pct_of_100"].map(_to_number)
 
@@ -548,6 +634,17 @@ def prepare_chart_data(df: pd.DataFrame, fx_rates: Optional[dict[str, Any]] = No
 
 def run_data_quality_checks(df: pd.DataFrame) -> pd.DataFrame:
     warnings: list[dict[str, Any]] = []
+    warning_columns = [
+        "warning_type",
+        "tso",
+        "border_point",
+        "border_point_short",
+        "delivery_period",
+        "product_type",
+        "price_original",
+        "price_eur_per_mwh",
+        "explanation",
+    ]
 
     duplicate_cols = ["tso", "border_point_full", "direction", "product", "period"]
     duplicate_mask = df.duplicated(duplicate_cols, keep=False) if all(c in df.columns for c in duplicate_cols) else pd.Series(False, index=df.index)
@@ -606,7 +703,7 @@ def run_data_quality_checks(df: pd.DataFrame) -> pd.DataFrame:
         if duplicate_mask.loc[idx]:
             add(idx, "duplicate_row", "Duplicate row for the same TSO, border point, direction, product, and period.")
 
-    return pd.DataFrame(warnings)
+    return pd.DataFrame(warnings, columns=warning_columns)
 
 
 def attach_quality_warnings(df: pd.DataFrame, quality_df: pd.DataFrame) -> pd.DataFrame:

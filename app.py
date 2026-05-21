@@ -212,8 +212,10 @@ if capacity_upload is not None:
         cap_df = capacity.read_uploaded(capacity_upload)
     except Exception as exc:  # noqa: BLE001
         st.sidebar.warning(f"Could not parse uploaded capacity file: {exc}")
-if cap_df is None:
+if cap_df is None and use_dummy:
     cap_df = dummy.capacity_bookings()
+elif cap_df is None:
+    cap_df = capacity.empty_capacity_frame()
 capacity_fx = load_capacity_fx_rates()
 cap_df = capacity.prepare_chart_data(cap_df, fx_rates=capacity_fx)
 cap_quality = capacity.run_data_quality_checks(cap_df)
@@ -463,6 +465,9 @@ with tab_flows:
 with tab_capacity:
     st.subheader("Cross-border capacity bookings")
     st.caption("FGSZ · Bulgartransgaz · Gastrans — daily / monthly / quarterly products")
+
+    if cap_df.empty:
+        st.info("Upload an ENTSOG / capacity booking CSV or XLSX to show confirmed capacity bookings. Dummy capacity data is only used when 'Use dummy demonstration data' is enabled.")
 
     with st.sidebar.expander("Capacity booking filters", expanded=True):
         tso_values = sorted(cap_df["tso"].dropna().unique())
