@@ -9,17 +9,23 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+import requests
 
 
 BORDER_POINT_SHORT_NAMES = {
     "Kireevo (BG)/Zaychar (RS)": "BG->RS Kireevo",
+    "Kireevo / Zaychar": "BG->RS Kireevo",
     "Kiskundorozsma 2": "RS->HU Kisk. 2",
     "Kiskundorozsma (HU)/Kiskundorozsma (RS)": "HU->RS Kisk.",
     "Kiskundorozsma": "HU->RS Kisk.",
     "Kalotina": "BG->RS Kalotina",
+    "Horgos": "HU->RS Horgos",
+    "Zvornik": "BA/RS Zvornik",
+    "Mokrin": "RS storage / Mokrin",
 }
 
 PRODUCT_ORDER = ["Within-day", "Day-ahead", "Daily", "Monthly", "Quarterly", "Yearly", "Unknown"]
+FX_CURRENCIES = ["EUR", "HUF", "RSD", "BGN", "RON", "USD", "CHF", "GBP"]
 
 COLUMN_ALIASES = {
     "tso": ["tso", "operator", "transmission system operator"],
@@ -27,8 +33,8 @@ COLUMN_ALIASES = {
     "direction": ["type", "direction", "entry/exit"],
     "product": ["product", "product type", "runtime period"],
     "period": ["period", "delivery period", "gas day", "date"],
-    "offered_mwh": ["offered (mwh/day)", "offered", "offered_mwh", "offered capacity"],
-    "booked_mwh": ["booked (mwh/day)", "booked", "booked_mwh", "booked capacity"],
+    "offered_mwh": ["offered (mwh/day)", "offered", "offered_mwh", "offered capacity", "offered_capacity_mwh_day"],
+    "booked_mwh": ["booked (mwh/day)", "booked", "booked_mwh", "booked capacity", "booked_capacity_mwh_day"],
     "utilisation_pct": ["booked %", "booked%", "utilisation_pct", "utilization_pct", "utilisation"],
     "price": ["price", "reserve price", "tariff"],
     "currency": ["currency", "ccy"],
@@ -77,6 +83,53 @@ def _days_between(start: pd.Timestamp, end: pd.Timestamp) -> float:
     if pd.isna(start) or pd.isna(end):
         return np.nan
     return max(1, int((end - start).days) + 1)
+
+
+def fetch_latest_fx_rates(timeout: int = 10) -> dict[str, Any]:
+    """Fetch latest available FX rates as original-currency units converted to EUR.
+
+    Frankfurter is backed by ECB reference rates for ECB currencies. BGN is fixed
+    by currency board at 1 EUR = 1.95583 BGN, so it is included explicitly even
+    when the API is unavailable.
+    """
+    rates = {
+        "EUR": {
+            "fx_rate_to_eur": 1.0,
+            "fx_source": "EUR base",
+            "fx_rate_date": pd.Timestamp.today().date().isoformat(),
+            "note": "EUR price; no FX conversion needed.",
+        },
+        "BGN": {
+            "fx_rate_to_eur": 1.0 / 1.95583,
+            "fx_source": "Bulgarian lev fixed parity",
+            "fx_rate_date": pd.Timestamp.today().date().isoformat(),
+            "note": "BGN converted using fixed parity: 1 EUR = 1.95583 BGN.",
+        },
+    }
+    errors: list[str] = []
+
+    try:
+        symbols = ",".join(c for c in FX_CURRENCIES if c not in {"EUR", "BGN"})
+        response = requests.get(
+            "https://api.frankfurter.app/latest",
+            params={"from": "EUR", "to": symbols},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        rate_date = payload.get("date") or pd.Timestamp.today().date().isoformat()
+        for currency, eur_to_currency in payload.get("rates", {}).items():
+            if eur_to_currency:
+                rates[currency.upper()] = {
+                    "fx_rate_to_eur": 1.0 / float(eur_to_currency),
+                    "fx_source": "Frankfurter / ECB latest reference rates",
+                    "fx_rate_date": rate_date,
+                    "note": f"{currency.upper()} converted using latest available daily reference rate.",
+                }
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"Frankfurter FX fetch failed: {exc}")
+
+    return {"rates": rates, "errors": errors}
 
 
 def parse_product_period(product: Any, period: Any, reference_date: Optional[date] = None) -> dict[str, Any]:
@@ -220,6 +273,7 @@ def convert_price_to_eur_per_mwh(
     unit: Any,
     booked_mwh_per_day: float,
     period_days: float,
+    fx_rates: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Convert capacity tariffs to an effective EUR/MWh over the delivery period.
 
@@ -227,22 +281,43 @@ def convert_price_to_eur_per_mwh(
     booked MWh/day is converted to kWh/h, cost is calculated for the tariff
     period, then divided by booked energy over the same delivery period.
     """
+    base = {
+        "fx_source": "",
+        "fx_rate_date": "",
+        "fx_rate_to_eur": np.nan,
+        "price_converted_eur": np.nan,
+        "converted_price_eur": np.nan,
+    }
     if pd.isna(price_numeric):
-        return {"price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": "Missing price."}
+        return {**base, "price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": "Missing price."}
     if not currency:
-        return {"price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": "Missing currency."}
-    if str(currency).upper() != "EUR":
-        return {"price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": f"Currency {currency} is not converted because no FX rate is available."}
+        return {**base, "price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": "Missing currency."}
+    currency = str(currency).upper()
+    fx_lookup = (fx_rates or {}).get("rates", fx_rates or {})
+    fx = fx_lookup.get(currency)
+    if not fx:
+        return {**base, "price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": f"Missing FX rate for {currency}; price not converted."}
+    fx_rate = float(fx["fx_rate_to_eur"])
+    price_eur = price_numeric * fx_rate
+    base.update(
+        {
+            "fx_source": fx.get("fx_source", ""),
+            "fx_rate_date": fx.get("fx_rate_date", ""),
+            "fx_rate_to_eur": fx_rate,
+            "price_converted_eur": price_eur,
+            "converted_price_eur": price_eur,
+        }
+    )
     if pd.isna(booked_mwh_per_day) or booked_mwh_per_day <= 0:
-        return {"price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": "Missing or zero booked capacity; effective EUR/MWh cannot be calculated."}
+        return {**base, "price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": "Missing or zero booked capacity; effective EUR/MWh cannot be calculated."}
     if pd.isna(period_days) or period_days <= 0:
-        return {"price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": "Missing delivery period length."}
+        return {**base, "price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": np.nan, "price_conversion_note": "Missing delivery period length."}
 
     unit_clean = re.sub(r"\s+", "", str(unit).lower())
     booked_energy = booked_mwh_per_day * period_days
 
-    if "mwh" in unit_clean and "day" in unit_clean and "kwh/h" not in unit_clean:
-        return {"price_eur_per_mwh": price_numeric, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": "Interpreted as EUR/MWh/day energy price."}
+    if "mwh" in unit_clean and "kwh/h" not in unit_clean:
+        return {**base, "price_eur_per_mwh": price_eur, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": f"Interpreted as {currency}/MWh and converted to EUR/MWh."}
 
     if "kwh/h" in unit_clean:
         hourly_capacity_kwh = booked_mwh_per_day * 1000.0 / 24.0
@@ -253,18 +328,20 @@ def convert_price_to_eur_per_mwh(
         elif "/quarter" in unit_clean:
             charged_days = period_days
         elif "/year" in unit_clean:
-            charged_days = period_days
+            charged_days = 1.0 / 24.0
         elif "/period" in unit_clean or unit_clean.endswith("/p"):
             charged_days = 1.0 / 24.0
         else:
-            return {"price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": f"Price unit '{unit}' could not be parsed."}
-        total_cost = price_numeric * hourly_capacity_kwh * 24.0 * charged_days
-        return {"price_eur_per_mwh": total_cost / booked_energy, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": "Converted from EUR/kWh/h capacity tariff."}
+            return {**base, "price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": f"Price unit '{unit}' could not be parsed."}
+        if "/month" in unit_clean or "/quarter" in unit_clean:
+            charged_days = 1.0 / 24.0
+        total_cost = price_eur * hourly_capacity_kwh * 24.0 * charged_days
+        note = f"Converted from {currency}/kWh/h capacity tariff."
+        if currency == "BGN":
+            note += " BGN uses fixed parity: 1 EUR = 1.95583 BGN."
+        return {**base, "price_eur_per_mwh": total_cost / booked_energy, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": note}
 
-    if "eur/mwh" in unit_clean:
-        return {"price_eur_per_mwh": price_numeric, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": "Already in EUR/MWh."}
-
-    return {"price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": f"Price unit '{unit}' could not be parsed."}
+    return {**base, "price_eur_per_mwh": np.nan, "booked_energy_mwh_for_period": booked_energy, "price_conversion_note": f"Price unit '{unit}' could not be parsed."}
 
 
 def border_point_short_name(border_point: Any, direction: Any = None) -> str:
@@ -277,7 +354,7 @@ def border_point_short_name(border_point: Any, direction: Any = None) -> str:
     return compact[:24] + "..." if len(compact) > 27 else compact
 
 
-def prepare_chart_data(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_chart_data(df: pd.DataFrame, fx_rates: Optional[dict[str, Any]] = None) -> pd.DataFrame:
     """Return normalized capacity booking rows ready for tables and charts."""
     out = pd.DataFrame()
     for target, aliases in COLUMN_ALIASES.items():
@@ -302,7 +379,7 @@ def prepare_chart_data(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat([out, pd.DataFrame(price_rows)], axis=1)
 
     conversion_rows = [
-        convert_price_to_eur_per_mwh(price, ccy, unit, booked, days)
+        convert_price_to_eur_per_mwh(price, ccy, unit, booked, days, fx_rates=fx_rates)
         for price, ccy, unit, booked, days in zip(
             out["price_numeric"],
             out["price_currency"],
@@ -316,6 +393,17 @@ def prepare_chart_data(df: pd.DataFrame) -> pd.DataFrame:
     missing_util = out["utilisation_pct"].isna() & out["booked_mwh"].notna() & out["offered_mwh"].gt(0)
     out.loc[missing_util, "utilisation_pct"] = out.loc[missing_util, "booked_mwh"] / out.loc[missing_util, "offered_mwh"] * 100.0
     out["delivery_sort"] = out["delivery_start"].fillna(pd.Timestamp.max)
+    out["type"] = out["direction"]
+    out["period_start"] = out["delivery_start"]
+    out["period_end"] = out["delivery_end"]
+    out["offered_capacity_mwh_day"] = out["offered_mwh"]
+    out["booked_capacity_mwh_day"] = out["booked_mwh"]
+    out["booked_percentage"] = out["utilisation_pct"]
+    out["original_price"] = out["price_original"]
+    out["original_currency"] = out["price_currency"]
+    out["price_original_currency"] = out["price_currency"]
+    out["original_price_unit"] = out["price_unit_detected"]
+    out["data_quality_warning"] = ""
     return out
 
 
@@ -361,6 +449,8 @@ def run_data_quality_checks(df: pd.DataFrame) -> pd.DataFrame:
                 add(idx, "booked_percentage_inconsistent", f"Booked % is {util:.1f}, but booked/offered implies {implied:.1f}.")
         if str(row.get("price_original", "")).strip() and pd.isna(row.get("price_eur_per_mwh")):
             add(idx, "price_not_converted", row.get("price_conversion_note") or "Price exists but conversion failed.")
+        if str(row.get("price_currency", "")).strip() and pd.isna(row.get("fx_rate_to_eur")):
+            add(idx, "missing_fx_rate", "FX rate is missing; non-EUR price cannot be converted.")
         if pd.notna(row.get("price_numeric")) and row.get("price_numeric") == 0 and pd.notna(booked) and booked > 0:
             add(idx, "zero_price_with_booked_capacity", "Price is zero while booked capacity is positive.")
         eur_mwh = row.get("price_eur_per_mwh")
@@ -372,49 +462,89 @@ def run_data_quality_checks(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(warnings)
 
 
+def attach_quality_warnings(df: pd.DataFrame, quality_df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out["data_quality_warning"] = ""
+    out["has_quality_warning"] = False
+    if quality_df.empty:
+        return out
+    grouped = (
+        quality_df.groupby(["tso", "border_point", "delivery_period"])["warning_type"]
+        .apply(lambda values: "; ".join(sorted(set(map(str, values)))))
+        .reset_index()
+    )
+    warning_map = {
+        (str(row["tso"]), str(row["border_point"]), str(row["delivery_period"])): row["warning_type"]
+        for _, row in grouped.iterrows()
+    }
+    warnings = []
+    for tso, bp, period in zip(out["tso"], out["border_point_full"], out["delivery_period"]):
+        value = warning_map.get((str(tso), str(bp), str(period)), "")
+        warnings.append(value)
+    out["data_quality_warning"] = warnings
+    out["has_quality_warning"] = out["data_quality_warning"].astype(bool)
+    return out
+
+
 def read_uploaded(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
-        raw = pd.read_csv(uploaded_file)
-    else:
-        raw = pd.read_excel(uploaded_file)
-    return prepare_chart_data(raw)
+        return pd.read_csv(uploaded_file)
+    return pd.read_excel(uploaded_file)
 
 
 def format_table(df: pd.DataFrame) -> pd.DataFrame:
     cols = [
         "tso",
-        "border_point_short",
         "border_point_full",
-        "direction",
+        "border_point_short",
+        "type",
         "product_type",
+        "product",
         "delivery_period",
-        "offered_mwh",
-        "booked_mwh",
-        "utilisation_pct",
-        "price_original",
-        "price_currency",
-        "price_unit_detected",
+        "period_start",
+        "period_end",
+        "period_days",
+        "offered_capacity_mwh_day",
+        "booked_capacity_mwh_day",
+        "booked_percentage",
+        "original_price",
+        "original_currency",
+        "original_price_unit",
+        "fx_rate_to_eur",
+        "fx_rate_date",
+        "fx_source",
+        "converted_price_eur",
         "price_eur_per_mwh",
         "price_conversion_note",
+        "data_quality_warning",
     ]
     present = [c for c in cols if c in df.columns]
     out = df[present].copy()
     rename = {
         "tso": "TSO",
-        "border_point_short": "Border point",
         "border_point_full": "Full border point",
-        "direction": "Type",
+        "border_point_short": "Border point",
+        "type": "Type",
         "product_type": "Product type",
+        "product": "Product",
         "delivery_period": "Delivery period",
-        "offered_mwh": "Offered (MWh/day)",
-        "booked_mwh": "Booked (MWh/day)",
-        "utilisation_pct": "Booked %",
-        "price_original": "Original price",
-        "price_currency": "Currency",
-        "price_unit_detected": "Unit detected",
+        "period_start": "Period start",
+        "period_end": "Period end",
+        "period_days": "Days",
+        "offered_capacity_mwh_day": "Offered (MWh/day)",
+        "booked_capacity_mwh_day": "Booked (MWh/day)",
+        "booked_percentage": "Booked %",
+        "original_price": "Original price",
+        "original_currency": "Currency",
+        "original_price_unit": "Unit",
+        "fx_rate_to_eur": "FX to EUR",
+        "fx_rate_date": "FX date",
+        "fx_source": "FX source",
+        "converted_price_eur": "Price in EUR",
         "price_eur_per_mwh": "EUR/MWh",
         "price_conversion_note": "Conversion note",
+        "data_quality_warning": "Data quality warning",
     }
     return out.rename(columns=rename).sort_values(
         by=[c for c in ["Product type", "Delivery period", "Border point"] if c in out.rename(columns=rename).columns]

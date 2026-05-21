@@ -546,6 +546,10 @@ def _capacity_hover_fields(cap_df: pd.DataFrame) -> np.ndarray:
         cap_df.get("price_unit_detected", pd.Series("", index=cap_df.index)),
         cap_df.get("price_eur_per_mwh", pd.Series(np.nan, index=cap_df.index)),
         cap_df.get("price_conversion_note", pd.Series("", index=cap_df.index)),
+        cap_df.get("fx_rate_to_eur", pd.Series(np.nan, index=cap_df.index)),
+        cap_df.get("fx_rate_date", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_currency", pd.Series("", index=cap_df.index)),
+        cap_df.get("price_converted_eur", pd.Series(np.nan, index=cap_df.index)),
     ]
     return np.stack([s.to_numpy() for s in fields], axis=-1)
 
@@ -574,6 +578,7 @@ def plot_capacity_booked_chart(cap_df: pd.DataFrame) -> go.Figure:
                     "Booked: %{customdata[4]:,.0f} MWh/day<br>"
                     "Booked %%: %{customdata[5]:.1f}<br>"
                     "Original price: %{customdata[6]} %{customdata[7]}<br>"
+                    "FX to EUR: %{customdata[10]:.6f} (%{customdata[11]})<br>"
                     "EUR/MWh: %{customdata[8]:.4f}<br>"
                     "%{customdata[9]}<extra></extra>"
                 ),
@@ -670,7 +675,9 @@ def plot_capacity_price_chart(cap_df: pd.DataFrame) -> go.Figure:
                 hovertemplate=(
                     "<b>%{customdata[0]}</b><br>"
                     "Period: %{x}<br>"
-                    "Original price: %{customdata[6]} %{customdata[7]}<br>"
+                    "Original price: %{customdata[6]} %{customdata[12]} %{customdata[7]}<br>"
+                    "FX to EUR: %{customdata[10]:.6f} (%{customdata[11]})<br>"
+                    "Price in EUR: %{customdata[13]:.6f}<br>"
                     "EUR/MWh: %{y:.4f}<br>"
                     "%{customdata[9]}<extra></extra>"
                 ),
