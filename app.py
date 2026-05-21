@@ -467,7 +467,22 @@ with tab_capacity:
     st.caption("FGSZ · Bulgartransgaz · Gastrans — daily / monthly / quarterly products")
 
     if cap_df.empty:
-        st.info("Upload an ENTSOG / capacity booking CSV or XLSX to show confirmed capacity bookings. Dummy capacity data is only used when 'Use dummy demonstration data' is enabled.")
+        st.info(
+            "No capacity booking data is loaded. Upload an ENTSOG / capacity booking CSV or XLSX "
+            "in the sidebar, or enable 'Use dummy demonstration data' if you only want a preview."
+        )
+        st.markdown("### Capacity data status")
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "Required input": ["Capacity bookings CSV/XLSX"],
+                    "Status": ["Missing"],
+                    "What to do": ["Upload the ENTSOG export in the sidebar Capacity bookings uploader."],
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     with st.sidebar.expander("Capacity booking filters", expanded=True):
         tso_values = sorted(cap_df["tso"].dropna().unique())
