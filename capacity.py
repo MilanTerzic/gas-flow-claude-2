@@ -41,6 +41,7 @@ COLUMN_ALIASES = {
     "currency": ["currency", "ccy"],
     "pct_of_100": ["% of 100", "pct_of_100"],
     "price_unit": ["price unit", "unit", "price_unit"],
+    "source_timestamp": ["source timestamp", "retrieval date", "retrieved at", "created at", "updated at", "timestamp"],
 }
 
 
@@ -423,6 +424,67 @@ def border_point_short_name(border_point: Any, direction: Any = None) -> str:
     return compact[:24] + "..." if len(compact) > 27 else compact
 
 
+def plotted_series_validation_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Summarize exactly what source rows feed the booked-capacity chart."""
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "source_tso",
+                "entsog_point_name",
+                "point_key",
+                "direction",
+                "delivery_period",
+                "offered_capacity_mwh_day",
+                "booked_capacity_mwh_day",
+                "original_unit",
+                "converted_unit",
+                "source_timestamp",
+            ]
+        )
+    grouped = (
+        df.groupby(
+            [
+                "tso",
+                "border_point_full",
+                "border_point_short",
+                "direction",
+                "delivery_period",
+                "delivery_sort",
+            ],
+            as_index=False,
+            dropna=False,
+        )
+        .agg(
+            offered_capacity_mwh_day=("offered_mwh", "sum"),
+            booked_capacity_mwh_day=("booked_mwh", "sum"),
+            original_unit=("price_unit_detected", lambda s: ", ".join(sorted({str(v) for v in s if str(v).strip()}))),
+            converted_unit=("price_conversion_status", lambda s: "EUR/MWh" if (s == "success").any() else ""),
+            source_timestamp=("source_retrieval_date", lambda s: ", ".join(sorted({str(v) for v in s if str(v).strip()}))),
+        )
+        .sort_values(["delivery_sort", "tso", "border_point_short", "direction"])
+    )
+    grouped["point_key"] = grouped["border_point_short"] + " | " + grouped["tso"] + " | " + grouped["direction"]
+    return grouped.rename(
+        columns={
+            "tso": "source_tso",
+            "border_point_full": "entsog_point_name",
+        }
+    )[
+        [
+            "source_tso",
+            "entsog_point_name",
+            "point_key",
+            "direction",
+            "delivery_period",
+            "offered_capacity_mwh_day",
+            "booked_capacity_mwh_day",
+            "original_unit",
+            "converted_unit",
+            "source_timestamp",
+        ]
+    ]
+
+
 def prepare_chart_data(df: pd.DataFrame, fx_rates: Optional[dict[str, Any]] = None) -> pd.DataFrame:
     """Return normalized capacity booking rows ready for tables and charts."""
     out = pd.DataFrame()
@@ -432,10 +494,11 @@ def prepare_chart_data(df: pd.DataFrame, fx_rates: Optional[dict[str, Any]] = No
 
     out["tso"] = out["tso"].fillna("").astype(str).str.strip()
     out["border_point_full"] = out["border_point"].fillna("").astype(str).str.strip()
-    out["border_point_short"] = [border_point_short_name(bp, d) for bp, d in zip(out["border_point_full"], out["direction"])]
     out["direction"] = out["direction"].fillna("").astype(str).str.strip().str.lower()
+    out["border_point_short"] = [border_point_short_name(bp, d) for bp, d in zip(out["border_point_full"], out["direction"])]
     out["product"] = out["product"].fillna("").astype(str).str.strip()
     out["period"] = out["period"].fillna("").astype(str).str.strip()
+    out["source_timestamp"] = out["source_timestamp"].fillna("").astype(str).str.strip()
     out["offered_mwh"] = out["offered_mwh"].map(_to_number)
     out["booked_mwh"] = out["booked_mwh"].map(_to_number)
     out["utilisation_pct"] = out["utilisation_pct"].map(_to_number)
@@ -475,6 +538,10 @@ def prepare_chart_data(df: pd.DataFrame, fx_rates: Optional[dict[str, Any]] = No
     out["original_price_unit"] = out["price_unit_detected"]
     out["price_original_unit"] = out["price_unit_detected"]
     out["fx_source"] = out["fx_rate_source"]
+    out["source_retrieval_date"] = out["source_timestamp"].where(
+        out["source_timestamp"].astype(str).str.strip().astype(bool),
+        pd.Timestamp.today().date().isoformat(),
+    )
     out["data_quality_warning"] = ""
     return out
 

@@ -734,7 +734,11 @@ CAPACITY_HOVER_TEMPLATE = (
 )
 
 
-def plot_capacity_booked_chart(cap_df: pd.DataFrame, chart_type: str = "Line chart") -> go.Figure:
+def plot_capacity_booked_chart(
+    cap_df: pd.DataFrame,
+    chart_type: str = "Line chart",
+    show_zero_only: bool = False,
+) -> go.Figure:
     """Booked capacity by delivery period, color-coded by short border point."""
     fig = go.Figure()
     if cap_df.empty:
@@ -743,14 +747,14 @@ def plot_capacity_booked_chart(cap_df: pd.DataFrame, chart_type: str = "Line cha
 
     grouped = (
         cap_df.sort_values("delivery_sort")
-        .groupby(["delivery_period", "delivery_sort", "tso", "border_point_short"], as_index=False)
+        .groupby(["delivery_period", "delivery_sort", "tso", "border_point_short", "direction"], as_index=False)
         .agg(
             booked_mwh=("booked_mwh", "sum"),
             offered_mwh=("offered_mwh", "sum"),
             utilisation_pct=("utilisation_pct", "mean"),
             border_point_full=("border_point_full", "first"),
-            direction=("direction", "first"),
             product_level=("product_level", lambda s: ", ".join(sorted(set(map(str, s))))),
+            product=("product", lambda s: ", ".join(sorted({str(v) for v in s if str(v).strip()}))),
             period_start=("period_start", "first"),
             period_end=("period_end", "first"),
             period_days=("period_days", "first"),
@@ -764,7 +768,17 @@ def plot_capacity_booked_chart(cap_df: pd.DataFrame, chart_type: str = "Line cha
         )
     )
 
-    grouped["legend_label"] = grouped["border_point_short"].astype(str) + " (" + grouped["tso"].astype(str) + ")"
+    grouped["legend_label"] = (
+        grouped["border_point_short"].astype(str)
+        + " "
+        + grouped["direction"].astype(str)
+        + " ("
+        + grouped["tso"].astype(str)
+        + ")"
+    )
+    if not show_zero_only:
+        non_zero_labels = grouped.groupby("legend_label")["booked_mwh"].sum()
+        grouped = grouped[grouped["legend_label"].isin(non_zero_labels[non_zero_labels > 0].index)]
     for label in sorted(grouped["legend_label"].dropna().unique()):
         sub = grouped[grouped["legend_label"] == label].sort_values("delivery_sort")
         if chart_type == "Grouped bar chart":
@@ -792,7 +806,7 @@ def plot_capacity_booked_chart(cap_df: pd.DataFrame, chart_type: str = "Line cha
             )
     if chart_type == "Grouped bar chart":
         fig.update_layout(barmode="group")
-    _apply_common_layout(fig, "Booked capacity by delivery period", "MWh/day", 380)
+    _apply_common_layout(fig, "Booked capacity by delivery period", "MWh/day", 430)
     fig.update_xaxes(tickangle=-30)
     return fig
 
@@ -821,7 +835,7 @@ def plot_capacity_product_level_chart(cap_df: pd.DataFrame) -> go.Figure:
                 hovertemplate=f"{product}<br>Period: %{{x}}<br>Booked: %{{y:,.0f}} MWh/day<extra></extra>",
             )
         )
-    _apply_common_layout(fig, "Booked capacity by product level", "MWh/day", 320)
+    _apply_common_layout(fig, "Booked capacity by product level", "MWh/day", 300)
     fig.update_xaxes(tickangle=-30)
     return fig
 
@@ -834,7 +848,7 @@ def plot_capacity_price_chart(cap_df: pd.DataFrame) -> go.Figure:
         & (cap_df.get("price_conversion_status", "success") == "success")
     ].copy()
     if sub.empty:
-        _apply_common_layout(fig, "Price by product level and border point", "EUR/MWh", 320)
+        _apply_common_layout(fig, "Price by product level and border point", "EUR/MWh", 300)
         return fig
     sub["legend_label"] = sub["border_point_short"].astype(str) + " (" + sub["tso"].astype(str) + ")"
     for label in sorted(sub["legend_label"].dropna().unique()):
@@ -849,6 +863,6 @@ def plot_capacity_price_chart(cap_df: pd.DataFrame) -> go.Figure:
                 hovertemplate=CAPACITY_HOVER_TEMPLATE,
             )
         )
-    _apply_common_layout(fig, "Price by product level and border point", "EUR/MWh", 320)
+    _apply_common_layout(fig, "Price by product level and border point", "EUR/MWh", 300)
     fig.update_xaxes(tickangle=-30)
     return fig
