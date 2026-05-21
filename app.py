@@ -67,11 +67,6 @@ st.caption(
 )
 
 
-@st.cache_data(ttl=60 * 60 * 6)
-def load_capacity_fx_rates():
-    return capacity.fetch_latest_fx_rates()
-
-
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
@@ -214,10 +209,6 @@ if capacity_upload is not None:
         st.sidebar.warning(f"Could not parse uploaded capacity file: {exc}")
 if cap_df is None:
     cap_df = dummy.capacity_bookings()
-capacity_fx = load_capacity_fx_rates()
-cap_df = capacity.prepare_chart_data(cap_df, fx_rates=capacity_fx)
-cap_quality = capacity.run_data_quality_checks(cap_df)
-cap_df = capacity.attach_quality_warnings(cap_df, cap_quality)
 
 # 5) Build balance — single source of truth, all on date_index
 balance = demand.build_balance(
@@ -464,109 +455,34 @@ with tab_capacity:
     st.subheader("Cross-border capacity bookings")
     st.caption("FGSZ · Bulgartransgaz · Gastrans — daily / monthly / quarterly products")
 
-    fx_dates = sorted({str(v.get("fx_rate_date", "")) for v in capacity_fx.get("rates", {}).values() if v.get("fx_rate_date")})
-    if capacity_fx.get("errors"):
-        st.warning("FX rates could not be fully refreshed. EUR and fixed BGN conversion remain available; other missing currencies are flagged.")
-    st.caption(
-        "FX rates used: latest available daily reference rates"
-        + (f" ({', '.join(fx_dates)})" if fx_dates else "")
-    )
-
-    with st.sidebar.expander("Capacity booking filters", expanded=True):
-        tso_values = sorted(cap_df["tso"].dropna().unique())
-        bp_values = sorted(cap_df["border_point_short"].dropna().unique())
-        dir_values = sorted(cap_df["direction"].dropna().unique())
-        prod_values = [p for p in capacity.PRODUCT_ORDER if p in set(cap_df["product_type"].dropna())]
-        currency_values = sorted(cap_df["price_currency"].dropna().unique())
-        period_values = (
-            cap_df[["delivery_period", "delivery_sort"]]
-            .drop_duplicates()
-            .sort_values("delivery_sort")["delivery_period"]
-            .tolist()
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        tso_filter = st.multiselect(
+            "TSO", sorted(cap_df["tso"].dropna().unique()),
+            default=sorted(cap_df["tso"].dropna().unique()),
         )
-        tso_filter = st.multiselect("TSO", tso_values, default=tso_values)
-        bp_filter = st.multiselect("Border point", bp_values, default=bp_values)
-        dir_filter = st.multiselect("Direction / Type", dir_values, default=dir_values)
-        prod_filter = st.multiselect("Product type", prod_values, default=prod_values)
-        period_filter = st.multiselect("Delivery period", period_values, default=period_values)
-        currency_filter = st.multiselect("Currency", currency_values, default=currency_values)
-        capacity_view_mode = st.radio(
-            "Capacity view",
-            ["Booked capacity", "Offered vs booked", "Utilization", "Price"],
-            horizontal=False,
+    with f2:
+        bp_filter = st.multiselect(
+            "Border point", sorted(cap_df["border_point"].dropna().unique()),
+            default=sorted(cap_df["border_point"].dropna().unique()),
         )
-        only_warnings = st.checkbox("Only show rows with data quality warnings", value=False)
-        only_booked = st.checkbox("Only show booked capacity > 0", value=False)
-
-    warning_keys = set()
-    if not cap_quality.empty:
-        warning_keys = set(
-            zip(
-                cap_quality["tso"].astype(str),
-                cap_quality["border_point"].astype(str),
-                cap_quality["delivery_period"].astype(str),
-            )
+    with f3:
+        dir_filter = st.multiselect(
+            "Direction", sorted(cap_df["direction"].dropna().unique()),
+            default=sorted(cap_df["direction"].dropna().unique()),
         )
-    cap_df["has_quality_warning"] = [
-        (str(tso), str(bp), str(period)) in warning_keys
-        for tso, bp, period in zip(cap_df["tso"], cap_df["border_point_full"], cap_df["delivery_period"])
-    ]
+    with f4:
+        prod_filter = st.multiselect(
+            "Product", sorted(cap_df["product"].dropna().unique()),
+            default=sorted(cap_df["product"].dropna().unique()),
+        )
 
     cap_view = cap_df[
         cap_df["tso"].isin(tso_filter)
-        & cap_df["border_point_short"].isin(bp_filter)
+        & cap_df["border_point"].isin(bp_filter)
         & cap_df["direction"].isin(dir_filter)
-        & cap_df["product_type"].isin(prod_filter)
-        & cap_df["delivery_period"].isin(period_filter)
-        & cap_df["price_currency"].isin(currency_filter)
+        & cap_df["product"].isin(prod_filter)
     ].copy()
-    if only_warnings:
-        cap_view = cap_view[cap_view["has_quality_warning"]]
-    if only_booked:
-        cap_view = cap_view[cap_view["booked_mwh"].fillna(0) > 0]
-
-    total_offered = cap_view["offered_mwh"].sum(skipna=True)
-    total_booked = cap_view["booked_mwh"].sum(skipna=True)
-    avg_booked_pct = total_booked / total_offered * 100 if total_offered else float("nan")
-    active_points = cap_view.loc[cap_view["booked_mwh"].fillna(0) > 0, "border_point_short"].nunique()
-    valid_price = cap_view[cap_view["price_eur_per_mwh"].notna() & cap_view["booked_energy_mwh_for_period"].gt(0)]
-    avg_eur_mwh = (
-        (valid_price["price_eur_per_mwh"] * valid_price["booked_energy_mwh_for_period"]).sum()
-        / valid_price["booked_energy_mwh_for_period"].sum()
-        if not valid_price.empty
-        else float("nan")
-    )
-
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("Total offered", f"{total_offered:,.0f} MWh/day")
-    k2.metric("Total booked", f"{total_booked:,.0f} MWh/day")
-    k3.metric("Avg booked %", f"{avg_booked_pct:,.1f}%" if pd.notna(avg_booked_pct) else "n/a")
-    k4.metric("Active points", f"{active_points:,.0f}")
-    k5.metric("Quality warnings", f"{len(cap_quality):,.0f}")
-    k6.metric("Weighted EUR/MWh", f"{avg_eur_mwh:,.4f}" if pd.notna(avg_eur_mwh) else "n/a")
-
-    with st.expander("Data quality", expanded=len(cap_quality) > 0):
-        dq1, dq2, dq3, dq4, dq5, dq6 = st.columns(6)
-        dq1.metric("Rows", f"{len(cap_df):,}")
-        dq2.metric("Warnings", f"{cap_df['has_quality_warning'].sum():,}")
-        dq3.metric("Missing prices", f"{(cap_df['price_original'].astype(str).str.strip() == '').sum():,}")
-        dq4.metric("Missing FX", f"{cap_quality[cap_quality['warning_type'] == 'missing_fx_rate'].shape[0] if not cap_quality.empty else 0:,}")
-        dq5.metric("Failed conversion", f"{cap_quality[cap_quality['warning_type'] == 'price_not_converted'].shape[0] if not cap_quality.empty else 0:,}")
-        dq6.metric("Duplicates", f"{cap_quality[cap_quality['warning_type'] == 'duplicate_row'].shape[0] if not cap_quality.empty else 0:,}")
-        if cap_quality.empty:
-            st.success("No capacity booking data quality warnings detected.")
-        else:
-            st.dataframe(cap_quality, use_container_width=True, hide_index=True)
-
-    if capacity_view_mode == "Offered vs booked":
-        primary_chart = charts.plot_offered_vs_booked_chart(cap_view)
-    elif capacity_view_mode == "Utilization":
-        primary_chart = charts.plot_capacity_utilisation_chart(cap_view)
-    elif capacity_view_mode == "Price":
-        primary_chart = charts.plot_capacity_price_chart(cap_view)
-    else:
-        primary_chart = charts.plot_capacity_booked_chart(cap_view)
-    st.plotly_chart(primary_chart, use_container_width=True, config={"displayModeBar": False})
 
     st.markdown("### Bookings table")
     grouped = capacity.format_table(cap_view)
@@ -589,7 +505,7 @@ with tab_capacity:
 
     # Prices — separate HUF / EUR
     st.markdown("**Price comparison** — HUF and EUR shown separately (different magnitudes)")
-    huf_fig, eur_fig = None, charts.plot_capacity_price_chart(cap_view)
+    huf_fig, eur_fig = charts.plot_capacity_price_chart(cap_view)
     pc1, pc2 = st.columns(2)
     with pc1:
         if huf_fig is not None:
@@ -601,12 +517,6 @@ with tab_capacity:
             st.plotly_chart(eur_fig, use_container_width=True, config={"displayModeBar": False})
         else:
             st.info("No EUR-priced bookings in current filter.")
-
-    st.plotly_chart(
-        charts.plot_offered_vs_booked_chart(cap_view),
-        use_container_width=True,
-        config={"displayModeBar": False},
-    )
 
     with st.expander("Raw capacity data"):
         st.dataframe(cap_view, use_container_width=True, hide_index=True)
