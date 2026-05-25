@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import requests
 
+ENTSOG_BASE_URL = "https://transparency.entsog.eu/api/v1"
+
 
 BORDER_POINT_SHORT_NAMES = {
     "Kireevo (BG)/Zaychar (RS)": "BG->RS Kireevo",
@@ -801,3 +803,204 @@ def format_table(df: pd.DataFrame) -> pd.DataFrame:
     return out.rename(columns=rename).sort_values(
         by=[c for c in ["Product type", "Delivery period", "Border point"] if c in out.rename(columns=rename).columns]
     )
+
+
+def _entsog_month_chunks(start_date: date, end_date: date) -> list[tuple[date, date]]:
+    chunks: list[tuple[date, date]] = []
+    cur = date(start_date.year, start_date.month, 1)
+    while cur <= end_date:
+        next_month = date(cur.year + 1, 1, 1) if cur.month == 12 else date(cur.year, cur.month + 1, 1)
+        chunk_start = max(start_date, cur)
+        chunk_end = min(end_date, (pd.Timestamp(next_month) - pd.Timedelta(days=1)).date())
+        if chunk_start <= chunk_end:
+            chunks.append((chunk_start, chunk_end))
+        cur = next_month
+    return chunks
+
+
+def _entsog_get_json(path: str, params: dict[str, Any], timeout: int = 60) -> tuple[list[dict[str, Any]], str]:
+    url = f"{ENTSOG_BASE_URL}/{path.lstrip('/')}"
+    print(f"[capacity][ENTSOG] GET {url} params={params}")
+    response = requests.get(url, params=params, timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    records = (
+        payload.get(path.strip("/"))
+        or payload.get("operationaldatas")
+        or payload.get("operatorpointdirections")
+        or payload.get("data")
+        or []
+    )
+    return records if isinstance(records, list) else [], response.url
+
+
+def _to_period_start_wet(period_value: Any) -> pd.Timestamp:
+    ts = pd.to_datetime(period_value, errors="coerce", utc=True)
+    if pd.isna(ts):
+        return pd.NaT
+    return pd.Timestamp(ts).tz_convert("WET").tz_localize(None).normalize()
+
+
+def _entsog_energy_to_mcm_day(value: Any, unit: Any, gcv_kwh_per_m3: float = 10.55) -> tuple[float, str]:
+    numeric = _to_number(value)
+    if pd.isna(numeric):
+        return np.nan, "missing_value"
+    if gcv_kwh_per_m3 <= 0:
+        return np.nan, "invalid_gcv"
+    unit_key = str(unit or "").lower().replace(" ", "")
+    if "kwh" in unit_key:
+        kwh_day = numeric
+    elif "mwh" in unit_key:
+        kwh_day = numeric * 1000.0
+    elif "gwh" in unit_key:
+        kwh_day = numeric * 1_000_000.0
+    else:
+        return np.nan, f"unsupported_unit:{unit or 'unknown'}"
+    return kwh_day / float(gcv_kwh_per_m3) / 1_000_000.0, "ok"
+
+
+def fetch_operator_point_directions(
+    operator_keywords: Optional[list[str]] = None,
+    point_keywords: Optional[list[str]] = None,
+    direction_key: Optional[str] = None,
+) -> pd.DataFrame:
+    operator_keywords = operator_keywords or ["Bulgartransgaz", "FGSZ"]
+    point_keywords = point_keywords or ["kireevo", "zaychar", "kiskundorozsma", "horgos", "kalotina", "serbia", "hungary", "bulgaria"]
+    records, _ = _entsog_get_json("operatorpointdirections", {"hasData": 1, "limit": -1}, timeout=60)
+    if not records:
+        return pd.DataFrame()
+    df = pd.DataFrame(records)
+    for col in ["operatorLabel", "pointLabel", "directionKey", "pointDirection"]:
+        if col not in df.columns:
+            df[col] = ""
+    op_mask = df["operatorLabel"].astype(str).str.lower().apply(lambda s: any(k.lower() in s for k in operator_keywords))
+    pt_mask = df["pointLabel"].astype(str).str.lower().apply(lambda s: any(k.lower() in s for k in point_keywords))
+    out = df[op_mask & pt_mask].copy()
+    if direction_key:
+        out = out[out["directionKey"].astype(str).str.lower() == str(direction_key).lower()]
+    out = out.drop_duplicates(subset=["pointDirection"]).reset_index(drop=True)
+    print(f"[capacity][ENTSOG] operatorPointDirections returned={len(out)}")
+    if not out.empty:
+        print(f"[capacity][ENTSOG] operatorPointDirections sample={out.iloc[0].to_dict()}")
+    return out
+
+
+def fetch_entsog_capacity_bookings(
+    start_date: date,
+    end_date: date,
+    granularity: str = "daily",
+    gcv_kwh_per_m3: float = 10.55,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    quality: dict[str, Any] = {
+        "api_calls": 0,
+        "records_fetched": 0,
+        "empty_responses": 0,
+        "failed_calls": 0,
+        "date_range_fetched": f"{start_date.isoformat()} to {end_date.isoformat()}",
+        "operators_included": [],
+        "points_included": [],
+        "warnings": [],
+        "latest_lastUpdateDateTime": None,
+        "unit_conversion_assumptions": f"gcv_kwh_per_m3={gcv_kwh_per_m3}",
+    }
+    opd = fetch_operator_point_directions()
+    if opd.empty:
+        quality["warnings"].append("No operator-point-direction rows found from ENTSOG /operatorpointdirections?hasData=1.")
+        return pd.DataFrame(), quality
+
+    quality["operators_included"] = sorted(opd["operatorLabel"].dropna().astype(str).unique().tolist())
+    quality["points_included"] = sorted(opd["pointLabel"].dropna().astype(str).unique().tolist())
+
+    month_chunks = _entsog_month_chunks(start_date, end_date)
+    rows: list[dict[str, Any]] = []
+
+    for _, op_row in opd.iterrows():
+        point_direction = str(op_row.get("pointDirection", "")).strip()
+        if not point_direction:
+            continue
+        found_data_for_point = False
+        for win_start, win_end in month_chunks:
+            params = {
+                "indicator": "Firm Booked",
+                "pointDirection": point_direction,
+                "from": win_start.isoformat(),
+                "to": win_end.isoformat(),
+                "periodType": "day",
+                "timeZone": "WET",
+                "limit": 1000,
+            }
+            try:
+                records, _ = _entsog_get_json("operationaldatas", params=params, timeout=60)
+                quality["api_calls"] += 1
+            except Exception as exc:  # noqa: BLE001
+                quality["failed_calls"] += 1
+                quality["warnings"].append(f"Failed call for {point_direction} [{win_start}..{win_end}]: {exc}")
+                continue
+
+            if not records:
+                quality["empty_responses"] += 1
+                fallback_params = dict(params)
+                fallback_params["limit"] = -1
+                fallback_params["to"] = min(win_start + pd.Timedelta(days=14), pd.Timestamp(win_end)).date().isoformat()
+                try:
+                    records, _ = _entsog_get_json("operationaldatas", params=fallback_params, timeout=60)
+                    quality["api_calls"] += 1
+                except Exception:
+                    quality["failed_calls"] += 1
+                    records = []
+            if not records:
+                continue
+            found_data_for_point = True
+            quality["records_fetched"] += len(records)
+            print(f"[capacity][ENTSOG] selected pointDirection={point_direction} rows={len(records)}")
+            print(f"[capacity][ENTSOG] sample record={records[0]}")
+            for rec in records:
+                row = dict(rec)
+                row["operatorLabel"] = row.get("operatorLabel", op_row.get("operatorLabel", ""))
+                row["pointLabel"] = row.get("pointLabel", op_row.get("pointLabel", ""))
+                row["directionKey"] = row.get("directionKey", op_row.get("directionKey", ""))
+                row["pointDirection"] = row.get("pointDirection", point_direction)
+                rows.append(row)
+        if not found_data_for_point:
+            quality["warnings"].append(
+                "No Firm Booked data returned for this operator-point-direction and period. "
+                f"({op_row.get('operatorLabel','')} | {op_row.get('pointLabel','')} | {point_direction})"
+            )
+
+    if not rows:
+        return pd.DataFrame(), quality
+
+    raw = pd.DataFrame(rows)
+    raw["periodFrom"] = raw.get("periodFrom", raw.get("from"))
+    raw["period"] = raw["periodFrom"].apply(_to_period_start_wet)
+    raw["value"] = pd.to_numeric(raw.get("value", np.nan), errors="coerce")
+    raw["original_unit"] = raw.get("unit", "")
+    conv = [_entsog_energy_to_mcm_day(v, u, gcv_kwh_per_m3=gcv_kwh_per_m3) for v, u in zip(raw["value"], raw["original_unit"])]
+    raw["converted_mcm_day"] = [v for v, _ in conv]
+    raw["conversion_status"] = [s for _, s in conv]
+    print("[capacity][ENTSOG] unit conversion sample:", raw[["value", "original_unit", "converted_mcm_day", "conversion_status"]].head(1).to_dict("records"))
+
+    gran_map = {"daily": "D", "monthly": "M", "quarterly": "Q", "yearly": "Y"}
+    gran = gran_map.get(str(granularity).lower(), "D")
+    raw["period_bucket"] = raw["period"].dt.to_period(gran).dt.to_timestamp()
+    raw["periodType"] = raw.get("periodType", "day").fillna("day")
+    raw["indicator"] = raw.get("indicator", "Firm Booked").fillna("Firm Booked")
+
+    out = (
+        raw.groupby(
+            ["period_bucket", "operatorLabel", "pointLabel", "directionKey", "pointDirection", "indicator", "periodType", "original_unit"],
+            as_index=False,
+            dropna=False,
+        )
+        .agg(
+            value=("value", "mean"),
+            converted_mcm_day=("converted_mcm_day", "mean"),
+            lastUpdateDateTime=("lastUpdateDateTime", "max"),
+            conversion_status=("conversion_status", lambda s: ",".join(sorted(set(map(str, s))))),
+        )
+        .rename(columns={"period_bucket": "period"})
+        .sort_values(["period", "operatorLabel", "pointLabel", "directionKey"])
+    )
+    if out["lastUpdateDateTime"].notna().any():
+        quality["latest_lastUpdateDateTime"] = str(out["lastUpdateDateTime"].dropna().max())
+    return out, quality

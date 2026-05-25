@@ -22,6 +22,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 import capacity, charts, demand, dummy, entsog, flows, model, temperature
@@ -464,185 +465,88 @@ with tab_flows:
 # =============================================================================
 with tab_capacity:
     st.subheader("Cross-border capacity bookings")
-    st.caption("FGSZ · Bulgartransgaz · Gastrans — daily / monthly / quarterly products")
+    st.caption("ENTSOG Firm Booked via operatorPointDirections discovery (Bulgartransgaz / FGSZ)")
 
-    if cap_df.empty:
-        st.info(
-            "No capacity booking data is loaded. Upload an ENTSOG / capacity booking CSV or XLSX "
-            "in the sidebar, or enable 'Use dummy demonstration data' if you only want a preview."
+    granularity = st.radio("Period granularity", ["daily", "monthly", "quarterly", "yearly"], index=0, horizontal=True)
+    gcv_kwh_per_m3 = st.number_input("GCV (kWh/m3) for conversion to mcm/day", min_value=1.0, max_value=20.0, value=10.55, step=0.01)
+    if st.button("Refresh ENTSOG Capacity Booking Data"):
+        st.cache_data.clear()
+
+    @st.cache_data(ttl=60 * 30)
+    def _load_entsog_bookings_cached(s: date, e: date, g: str, gcv: float):
+        return capacity.fetch_entsog_capacity_bookings(s, e, granularity=g, gcv_kwh_per_m3=gcv)
+
+    bookings_df, bookings_quality = _load_entsog_bookings_cached(start_date, end_date, granularity, gcv_kwh_per_m3)
+
+    if bookings_df.empty:
+        st.warning("No Firm Booked data returned for this operator-point-direction and period.")
+        if bookings_quality.get("warnings"):
+            st.dataframe(pd.DataFrame({"warning": bookings_quality["warnings"]}), use_container_width=True, hide_index=True)
+    else:
+        operator_values = sorted(bookings_df["operatorLabel"].dropna().astype(str).unique().tolist())
+        point_values = sorted(bookings_df["pointLabel"].dropna().astype(str).unique().tolist())
+        direction_values = sorted(bookings_df["directionKey"].dropna().astype(str).unique().tolist())
+        selected_operators = st.multiselect("Selected TSO/operator", operator_values, default=operator_values)
+        selected_points = st.multiselect("Selected border point", point_values, default=point_values)
+        selected_directions = st.multiselect("Direction: entry/exit", direction_values, default=direction_values)
+
+        view = bookings_df[
+            bookings_df["operatorLabel"].isin(selected_operators)
+            & bookings_df["pointLabel"].isin(selected_points)
+            & bookings_df["directionKey"].isin(selected_directions)
+        ].copy()
+        view["series"] = view["operatorLabel"] + " | " + view["pointLabel"] + " | " + view["directionKey"]
+        st.caption(f"Selected period: {start_date.isoformat()} to {end_date.isoformat()} | Granularity: {granularity}")
+
+        fig = px.area(
+            view.sort_values("period"),
+            x="period",
+            y="converted_mcm_day",
+            color="series",
+            title="Booked Capacity (converted to mcm/day)",
+            labels={"period": "Date / Period", "converted_mcm_day": "mcm/day"},
         )
-        st.markdown("### Capacity data status")
-        st.dataframe(
-            pd.DataFrame(
-                {
-                    "Required input": ["Capacity bookings CSV/XLSX"],
-                    "Status": ["Missing"],
-                    "What to do": ["Upload the ENTSOG export in the sidebar Capacity bookings uploader."],
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-    with st.sidebar.expander("Capacity booking filters", expanded=True):
-        tso_values = sorted(cap_df["tso"].dropna().unique())
-        bp_full_values = sorted(cap_df["border_point_full"].dropna().unique())
-        bp_values = sorted(cap_df["border_point_short"].dropna().unique())
-        dir_values = sorted(cap_df["direction"].dropna().unique())
-        product_level_order = ["Daily", "Monthly", "Quarterly", "Annual", "Day-ahead", "Within-day", "Unknown"]
-        prod_values = [p for p in product_level_order if p in set(cap_df["product_level"].dropna())]
-        default_delivery_level = "Monthly" if "Monthly" in prod_values else (prod_values[0] if prod_values else "Daily")
-        delivery_level = st.radio(
-            "Delivery period",
-            prod_values or ["Daily"],
-            index=(prod_values or ["Daily"]).index(default_delivery_level),
-            help="Only this period level is plotted. Daily, monthly, quarterly and annual bookings are never mixed on the main x-axis.",
-        )
-        product_values = sorted(cap_df.loc[cap_df["product_level"] == delivery_level, "product"].dropna().unique())
-        currency_values = sorted(cap_df["price_currency"].dropna().unique())
-        period_values = (
-            cap_df[cap_df["product_level"] == delivery_level][["delivery_period", "delivery_sort"]]
-            .drop_duplicates()
-            .sort_values("delivery_sort")["delivery_period"]
-            .tolist()
-        )
-        tso_filter = st.multiselect("TSO", tso_values, default=tso_values)
-        bp_full_filter = st.multiselect("Border point full", bp_full_values, default=bp_full_values)
-        bp_filter = st.multiselect("Border point short", bp_values, default=bp_values)
-        dir_filter = st.multiselect("Entry / exit type", dir_values, default=dir_values)
-        product_filter = st.multiselect("Product / auction type", product_values, default=product_values)
-        period_filter = st.multiselect("Delivery period", period_values, default=period_values)
-        currency_filter = st.multiselect("Currency", currency_values, default=currency_values)
-        chart_style = st.radio("Booked capacity chart", ["Line chart", "Stacked area chart", "Grouped bar chart"])
-        show_zero_series = st.checkbox("Show zero-only series", value=False)
-        only_warnings = st.checkbox("Only show rows with data quality warnings", value=False)
-        only_booked = st.checkbox("Only show booked capacity > 0", value=True)
-
-    warning_keys = set()
-    if not cap_quality.empty:
-        warning_keys = set(
-            zip(
-                cap_quality["tso"].astype(str),
-                cap_quality["border_point"].astype(str),
-                cap_quality["delivery_period"].astype(str),
-            )
-        )
-    cap_df["has_quality_warning"] = [
-        (str(tso), str(bp), str(period)) in warning_keys
-        for tso, bp, period in zip(cap_df["tso"], cap_df["border_point_full"], cap_df["delivery_period"])
-    ]
-
-    cap_view = cap_df[
-        cap_df["tso"].isin(tso_filter)
-        & cap_df["border_point_full"].isin(bp_full_filter)
-        & cap_df["border_point_short"].isin(bp_filter)
-        & cap_df["direction"].isin(dir_filter)
-        & (cap_df["product_level"] == delivery_level)
-        & cap_df["product"].isin(product_filter)
-        & cap_df["delivery_period"].isin(period_filter)
-        & cap_df["price_currency"].isin(currency_filter)
-    ].copy()
-    if only_warnings:
-        cap_view = cap_view[cap_view["has_quality_warning"]]
-    if only_booked:
-        cap_view = cap_view[cap_view["booked_mwh"].fillna(0) > 0]
-
-    st.plotly_chart(
-        charts.plot_capacity_booked_chart(cap_view, chart_type=chart_style, show_zero_only=show_zero_series),
-        use_container_width=True,
-        config={"displayModeBar": False},
-    )
-
-    st.markdown("### Plotted series validation")
-    st.dataframe(
-        capacity.plotted_series_validation_table(cap_view),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.plotly_chart(
-            charts.plot_capacity_product_level_chart(cap_view),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-    with c2:
-        st.plotly_chart(
-            charts.plot_capacity_price_chart(cap_view),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-
-    with st.expander("Additional capacity views"):
-        st.plotly_chart(
-            charts.plot_offered_vs_booked_chart(cap_view),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-        st.plotly_chart(
-            charts.plot_capacity_utilisation_chart(cap_view),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-
-    fx_dates = sorted({str(v.get("fx_rate_date", "")) for v in capacity_fx.get("rates", {}).values() if v.get("fx_rate_date")})
-    st.markdown("### Summary")
-    if capacity_fx.get("errors"):
-        st.warning("FX rates could not be fully refreshed. EUR and fixed BGN conversion remain available; other missing currencies are flagged.")
-    today_iso = pd.Timestamp.today().date().isoformat()
-    if any(rate_date and rate_date != today_iso for rate_date in fx_dates):
-        st.warning("Latest available FX reference rates are not dated today; using the latest published rate date shown below.")
-    st.caption(
-        "FX rates used: latest available daily reference rates"
-        + (f" ({', '.join(fx_dates)})" if fx_dates else "")
-    )
-
-    total_offered = cap_view["offered_mwh"].sum(skipna=True)
-    total_booked = cap_view["booked_mwh"].sum(skipna=True)
-    avg_booked_pct = total_booked / total_offered * 100 if total_offered else float("nan")
-    active_points = cap_view.loc[cap_view["booked_mwh"].fillna(0) > 0, "border_point_short"].nunique()
-    valid_price = cap_view[cap_view["price_eur_per_mwh"].notna() & cap_view["booked_energy_mwh_for_period"].gt(0)]
-    avg_eur_mwh = (
-        (valid_price["price_eur_per_mwh"] * valid_price["booked_energy_mwh_for_period"]).sum()
-        / valid_price["booked_energy_mwh_for_period"].sum()
-        if not valid_price.empty
-        else float("nan")
-    )
-
-    k1, k2, k3, k4, k5, k6 = st.columns(6)
-    k1.metric("Total offered", f"{total_offered:,.0f} MWh/day")
-    k2.metric("Total booked", f"{total_booked:,.0f} MWh/day")
-    k3.metric("Avg booked %", f"{avg_booked_pct:,.1f}%" if pd.notna(avg_booked_pct) else "n/a")
-    k4.metric("Active points", f"{active_points:,.0f}")
-    k5.metric("Quality warnings", f"{len(cap_quality):,.0f}")
-    k6.metric("Weighted EUR/MWh", f"{avg_eur_mwh:,.4f}" if pd.notna(avg_eur_mwh) else "n/a")
-
-    with st.expander("Data quality", expanded=False):
-        dq1, dq2, dq3, dq4, dq5, dq6 = st.columns(6)
-        dq1.metric("Rows", f"{len(cap_df):,}")
-        dq2.metric("Warnings", f"{cap_df['has_quality_warning'].sum():,}")
-        dq3.metric("Missing prices", f"{(cap_df['price_original'].astype(str).str.strip() == '').sum():,}")
-        dq4.metric("Missing FX", f"{cap_quality[cap_quality['warning_type'] == 'missing_fx_rate'].shape[0] if not cap_quality.empty else 0:,}")
-        dq5.metric("Failed conversion", f"{cap_quality[cap_quality['warning_type'] == 'price_not_converted'].shape[0] if not cap_quality.empty else 0:,}")
-        dq6.metric("Duplicates", f"{cap_quality[cap_quality['warning_type'] == 'duplicate_row'].shape[0] if not cap_quality.empty else 0:,}")
-        if cap_quality.empty:
-            st.success("No capacity booking data quality warnings detected.")
-        else:
-            st.dataframe(cap_quality, use_container_width=True, hide_index=True)
-
-    st.markdown("### Bookings table")
-    grouped = capacity.format_table(cap_view)
-    st.dataframe(grouped, use_container_width=True, hide_index=True)
-
-    with st.expander("Raw capacity data"):
-        st.dataframe(cap_view, use_container_width=True, hide_index=True)
+        table_cols = [
+            "period",
+            "operatorLabel",
+            "pointLabel",
+            "directionKey",
+            "pointDirection",
+            "indicator",
+            "periodType",
+            "value",
+            "original_unit",
+            "converted_mcm_day",
+            "lastUpdateDateTime",
+            "conversion_status",
+        ]
+        st.markdown("### Capacity booking table")
+        st.dataframe(view[table_cols], use_container_width=True, hide_index=True)
         st.download_button(
-            "Download as CSV",
-            data=cap_view.to_csv(index=False).encode("utf-8"),
-            file_name="serbia_capacity_bookings.csv",
+            "Download capacity booking data (CSV)",
+            data=view[table_cols].to_csv(index=False).encode("utf-8"),
+            file_name="entsog_firm_booked_capacity.csv",
             mime="text/csv",
         )
+
+    st.markdown("### Data quality")
+    dq_rows = [
+        {"metric": "number of API calls", "value": bookings_quality.get("api_calls", 0)},
+        {"metric": "number of records fetched", "value": bookings_quality.get("records_fetched", 0)},
+        {"metric": "date range fetched", "value": bookings_quality.get("date_range_fetched", "")},
+        {"metric": "operators included", "value": ", ".join(bookings_quality.get("operators_included", []))},
+        {"metric": "points included", "value": ", ".join(bookings_quality.get("points_included", []))},
+        {"metric": "empty responses", "value": bookings_quality.get("empty_responses", 0)},
+        {"metric": "failed calls", "value": bookings_quality.get("failed_calls", 0)},
+        {"metric": "unit conversion assumptions", "value": bookings_quality.get("unit_conversion_assumptions", "")},
+        {"metric": "latest lastUpdateDateTime", "value": bookings_quality.get("latest_lastUpdateDateTime", "")},
+    ]
+    st.dataframe(pd.DataFrame(dq_rows), use_container_width=True, hide_index=True)
+    if bookings_quality.get("warnings"):
+        st.warning("Warnings were detected for some pointDirection combinations.")
+        st.dataframe(pd.DataFrame({"warning": bookings_quality["warnings"]}), use_container_width=True, hide_index=True)
 
 
 # =============================================================================
