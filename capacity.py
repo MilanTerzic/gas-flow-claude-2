@@ -13,6 +13,47 @@ import pandas as pd
 import requests
 
 ENTSOG_BASE_URL = "https://transparency.entsog.eu/api/v1"
+DEFAULT_CAPACITY_INDICATORS = [
+    "Firm Technical",
+    "Firm Offered",
+    "Firm Booked",
+    "Firm Available",
+]
+
+TARGET_BORDER_POINTS = [
+    {
+        "canonical_key": "kiskundorozsma_2_horgos",
+        "label": "Kiskundorozsma-2 (HU) / Horgos (RS)",
+        "country_from": "HU",
+        "country_to": "RS",
+        "direction_hint": "entry",
+        "patterns": ["kiskundorozsma", "horg", "2"],
+    },
+    {
+        "canonical_key": "kiskundorozsma_hu_rs",
+        "label": "Kiskundorozsma (HU > RS)",
+        "country_from": "HU",
+        "country_to": "RS",
+        "direction_hint": "exit",
+        "patterns": ["kiskundorozsma"],
+    },
+    {
+        "canonical_key": "kalotina_dimitrovgrad",
+        "label": "Kalotina (BG) / Dimitrovgrad (RS)",
+        "country_from": "BG",
+        "country_to": "RS",
+        "direction_hint": "exit",
+        "patterns": ["kalotina", "dimitrovgrad"],
+    },
+    {
+        "canonical_key": "kireevo_zajecar",
+        "label": "Kireevo/Kirevo (BG) / Zajecar (RS)",
+        "country_from": "BG",
+        "country_to": "RS",
+        "direction_hint": "exit",
+        "patterns": ["kiree", "kirevo", "zajec", "zaychar"],
+    },
+]
 
 
 BORDER_POINT_SHORT_NAMES = {
@@ -1004,3 +1045,269 @@ def fetch_entsog_capacity_bookings(
     if out["lastUpdateDateTime"].notna().any():
         quality["latest_lastUpdateDateTime"] = str(out["lastUpdateDateTime"].dropna().max())
     return out, quality
+
+
+def _normalize_text(v: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(v or "").lower()).strip()
+
+
+def _match_target_border_point(point_label: str) -> dict[str, Any] | None:
+    text = _normalize_text(point_label)
+    for point in TARGET_BORDER_POINTS:
+        if all(p in text for p in point["patterns"]):
+            return point
+    for point in TARGET_BORDER_POINTS:
+        if any(p in text for p in point["patterns"]):
+            return point
+    return None
+
+
+def _infer_auction_product_type(date_from: pd.Timestamp, date_to: pd.Timestamp, period_type: str) -> str:
+    pt = str(period_type or "").lower().strip()
+    if pt in {"year", "yearly"}:
+        return "yearly"
+    if pt in {"quarter", "quarterly"}:
+        return "quarterly"
+    if pt in {"month", "monthly"}:
+        return "monthly"
+    if pt in {"day", "daily"}:
+        return "daily"
+    if pd.isna(date_from) or pd.isna(date_to):
+        return "daily"
+    days = max(1, int((date_to - date_from).days) + 1)
+    if days >= 330:
+        return "yearly"
+    if days >= 80:
+        return "quarterly"
+    if days >= 27:
+        return "monthly"
+    return "daily"
+
+
+def _indicator_column_name(indicator: str) -> str:
+    i = str(indicator or "").lower()
+    if "technical" in i:
+        return "technical_capacity"
+    if "offered" in i:
+        return "offered_capacity"
+    if "booked" in i or "allocated" in i:
+        return "booked_capacity"
+    if "available" in i:
+        return "available_capacity"
+    return ""
+
+
+def fetch_entsog_cross_border_capacity_year(
+    year: int,
+    include_points: Optional[list[str]] = None,
+    direction_filter: Optional[list[str]] = None,
+    preferred_unit: str = "mcm/day",
+    gcv_kwh_per_m3: float = 10.55,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    start_date = date(int(year), 1, 1)
+    end_date = date(int(year), 12, 31)
+    quality: dict[str, Any] = {
+        "last_successful_fetch": None,
+        "records_fetched": 0,
+        "api_errors": [],
+        "query_urls": [],
+        "missing_points": [],
+        "missing_products": [],
+        "data_warnings": [],
+        "matched_point_directions": [],
+        "date_range": f"{start_date.isoformat()} to {end_date.isoformat()}",
+        "unit": preferred_unit,
+        "gcv_kwh_per_m3": gcv_kwh_per_m3,
+    }
+
+    # Resolve live valid pointDirection values from ENTSOG metadata.
+    opd_records, opd_url = _entsog_get_json("operatorpointdirections", {"hasData": 1, "limit": -1}, timeout=60)
+    quality["query_urls"].append(opd_url)
+    if not opd_records:
+        quality["api_errors"].append("operatorpointdirections returned no records.")
+        return pd.DataFrame(), quality
+    opd = pd.DataFrame(opd_records)
+    for col in ["operatorLabel", "pointLabel", "pointDirection", "directionKey", "pointKey", "tsoEicCode"]:
+        if col not in opd.columns:
+            opd[col] = ""
+
+    matched_rows: list[pd.Series] = []
+    for _, row in opd.iterrows():
+        matched = _match_target_border_point(row.get("pointLabel"))
+        if not matched:
+            continue
+        if include_points and matched["canonical_key"] not in include_points:
+            continue
+        dkey = str(row.get("directionKey", "")).lower()
+        if direction_filter and dkey not in {d.lower() for d in direction_filter}:
+            continue
+        r = row.copy()
+        r["canonical_key"] = matched["canonical_key"]
+        r["canonical_label"] = matched["label"]
+        r["country_from"] = matched["country_from"]
+        r["country_to"] = matched["country_to"]
+        matched_rows.append(r)
+
+    if not matched_rows:
+        quality["api_errors"].append("No matching ENTSOG pointDirection values found for requested border points.")
+        quality["missing_points"] = [p["label"] for p in TARGET_BORDER_POINTS]
+        return pd.DataFrame(), quality
+
+    matched_df = pd.DataFrame(matched_rows).drop_duplicates(subset=["pointDirection"])
+    quality["matched_point_directions"] = matched_df["pointDirection"].astype(str).tolist()
+
+    all_records: list[dict[str, Any]] = []
+    for _, md in matched_df.iterrows():
+        pd_value = str(md.get("pointDirection", "")).strip()
+        if not pd_value:
+            continue
+        for indicator in DEFAULT_CAPACITY_INDICATORS:
+            for chunk_start, chunk_end in _entsog_month_chunks(start_date, end_date):
+                params = {
+                    "pointDirection": pd_value,
+                    "from": chunk_start.isoformat(),
+                    "to": chunk_end.isoformat(),
+                    "indicator": indicator,
+                    "periodType": "day",
+                    "timeZone": "WET",
+                    "limit": 1000,
+                }
+                try:
+                    records, final_url = _entsog_get_json("operationaldatas", params=params, timeout=60)
+                    quality["query_urls"].append(final_url)
+                except Exception as exc:  # noqa: BLE001
+                    quality["api_errors"].append(f"{indicator} {pd_value} {chunk_start}-{chunk_end}: {exc}")
+                    continue
+                if not records:
+                    continue
+                for rec in records:
+                    row = dict(rec)
+                    row["_query_indicator"] = indicator
+                    row["_query_url"] = final_url
+                    row["_canonical_key"] = md["canonical_key"]
+                    row["_canonical_label"] = md["canonical_label"]
+                    row["_country_from"] = md["country_from"]
+                    row["_country_to"] = md["country_to"]
+                    row["_pointDirection"] = pd_value
+                    row["_directionKey"] = md.get("directionKey", row.get("directionKey", ""))
+                    row["_pointKey"] = md.get("pointKey", row.get("pointKey", ""))
+                    row["_tsoEicCode"] = md.get("tsoEicCode", row.get("tsoEicCode", ""))
+                    all_records.append(row)
+
+    if not all_records:
+        quality["missing_points"] = [p["label"] for p in TARGET_BORDER_POINTS]
+        quality["api_errors"].append("No operationaldatas rows found for configured indicators/points.")
+        return pd.DataFrame(), quality
+
+    raw = pd.DataFrame(all_records)
+    raw["date_from"] = pd.to_datetime(raw.get("periodFrom", raw.get("from")), errors="coerce", utc=True).dt.tz_convert("WET").dt.tz_localize(None)
+    raw["date_to"] = pd.to_datetime(raw.get("periodTo", raw.get("to")), errors="coerce", utc=True).dt.tz_convert("WET").dt.tz_localize(None)
+    raw["gas_day"] = raw["date_from"].dt.normalize()
+    raw["interconnection_point_name"] = raw.get("pointLabel", "")
+    raw["interconnection_point_code"] = raw.get("pointKey", raw.get("_pointKey", ""))
+    raw["TSO"] = raw.get("operatorLabel", "")
+    raw["TSO_code"] = raw.get("tsoEicCode", raw.get("_tsoEicCode", ""))
+    raw["direction"] = raw.get("directionKey", raw.get("_directionKey", ""))
+    raw["pointDirection"] = raw.get("pointDirection", raw.get("_pointDirection", ""))
+    raw["indicator"] = raw.get("indicator", raw.get("_query_indicator", ""))
+    raw["unit"] = raw.get("unit", "")
+    raw["value"] = pd.to_numeric(raw.get("value", np.nan), errors="coerce")
+
+    mcm_conv = [_entsog_energy_to_mcm_day(v, u, gcv_kwh_per_m3=gcv_kwh_per_m3)[0] for v, u in zip(raw["value"], raw["unit"])]
+    raw["value_mcm_day"] = mcm_conv
+
+    column_for_indicator = raw["indicator"].map(_indicator_column_name)
+    raw["metric_col"] = column_for_indicator
+    raw = raw[raw["metric_col"] != ""].copy()
+    if raw.empty:
+        quality["api_errors"].append("Indicators returned data but none mapped to required capacity columns.")
+        return pd.DataFrame(), quality
+
+    key_cols = [
+        "date_from",
+        "date_to",
+        "gas_day",
+        "_country_from",
+        "_country_to",
+        "TSO",
+        "TSO_code",
+        "interconnection_point_name",
+        "interconnection_point_code",
+        "direction",
+        "pointDirection",
+        "_canonical_key",
+        "_canonical_label",
+        "unit",
+        "periodType",
+    ]
+    pivot = (
+        raw.pivot_table(
+            index=key_cols,
+            columns="metric_col",
+            values="value",
+            aggfunc="mean",
+        )
+        .reset_index()
+    )
+
+    mcm_pivot = (
+        raw.pivot_table(
+            index=key_cols,
+            columns="metric_col",
+            values="value_mcm_day",
+            aggfunc="mean",
+        )
+        .reset_index()
+    )
+    mcm_cols = {c: f"{c}_mcm_day" for c in ["technical_capacity", "offered_capacity", "booked_capacity", "available_capacity"] if c in mcm_pivot.columns}
+    mcm_pivot = mcm_pivot.rename(columns=mcm_cols)
+    merged = pivot.merge(mcm_pivot, on=key_cols, how="left")
+    merged["country_from"] = merged["_country_from"]
+    merged["country_to"] = merged["_country_to"]
+    merged["country_pair"] = merged["country_from"] + ">" + merged["country_to"]
+    merged["auction_product_type"] = [
+        _infer_auction_product_type(df, dt, pt)
+        for df, dt, pt in zip(merged["date_from"], merged["date_to"], merged.get("periodType", "day"))
+    ]
+    merged["source_url"] = ENTSOG_BASE_URL + "/operationaldatas"
+    merged["query_metadata"] = "indicator + pointDirection + from + to + periodType=day + timeZone=WET"
+    merged["booked_pct_of_technical"] = np.where(
+        merged.get("technical_capacity", 0).fillna(0) > 0,
+        merged.get("booked_capacity", np.nan) / merged.get("technical_capacity", np.nan) * 100.0,
+        np.nan,
+    )
+    merged["point_match_ok"] = merged["interconnection_point_name"].astype(str).apply(lambda x: _match_target_border_point(x) is not None)
+    merged["direction_match_ok"] = merged["direction"].astype(str).str.lower().isin(["entry", "exit"])
+    merged["suspicious_zero"] = (
+        merged.get("technical_capacity", 0).fillna(0).gt(0)
+        & merged.get("booked_capacity", 0).fillna(0).eq(0)
+    )
+    merged["duplicate_key"] = merged.duplicated(subset=["gas_day", "pointDirection", "auction_product_type"], keep=False)
+    merged["warning"] = ""
+    merged.loc[~merged["point_match_ok"], "warning"] += "point_mismatch;"
+    merged.loc[~merged["direction_match_ok"], "warning"] += "direction_mismatch;"
+    merged.loc[merged["suspicious_zero"], "warning"] += "booked_zero_with_technical_positive;"
+    merged.loc[merged["duplicate_key"], "warning"] += "duplicate_record;"
+    merged["warning"] = merged["warning"].str.strip(";")
+
+    # Missing products per point
+    required_products = {"yearly", "quarterly", "monthly", "daily"}
+    for point_key, g in merged.groupby("_canonical_key"):
+        missing = sorted(required_products - set(g["auction_product_type"].dropna().astype(str)))
+        if missing:
+            quality["missing_products"].append(f"{point_key}: {', '.join(missing)}")
+
+    found_points = set(merged["_canonical_key"].dropna().astype(str))
+    quality["missing_points"] = [p["label"] for p in TARGET_BORDER_POINTS if p["canonical_key"] not in found_points]
+    quality["records_fetched"] = len(merged)
+    quality["last_successful_fetch"] = pd.Timestamp.utcnow().isoformat()
+    quality["data_warnings"] = sorted(set([w for w in merged["warning"].astype(str).tolist() if w]))
+
+    if preferred_unit.lower() == "mcm/day":
+        for col in ["technical_capacity", "offered_capacity", "booked_capacity", "available_capacity"]:
+            mcol = f"{col}_mcm_day"
+            if mcol in merged.columns:
+                merged[col] = merged[mcol]
+        merged["unit"] = "mcm/day"
+
+    return merged.reset_index(drop=True), quality

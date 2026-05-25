@@ -23,6 +23,7 @@ from typing import Optional
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 import capacity, charts, demand, dummy, entsog, flows, model, temperature
@@ -465,88 +466,231 @@ with tab_flows:
 # =============================================================================
 with tab_capacity:
     st.subheader("Cross-border capacity bookings")
-    st.caption("ENTSOG Firm Booked via operatorPointDirections discovery (Bulgartransgaz / FGSZ)")
+    st.caption("Full-year ENTSOG capacity module (Jan 1 to Dec 31) with product split and quality diagnostics.")
 
-    granularity = st.radio("Period granularity", ["daily", "monthly", "quarterly", "yearly"], index=0, horizontal=True)
-    gcv_kwh_per_m3 = st.number_input("GCV (kWh/m3) for conversion to mcm/day", min_value=1.0, max_value=20.0, value=10.55, step=0.01)
-    if st.button("Refresh ENTSOG Capacity Booking Data"):
+    selected_year = st.selectbox("Year", options=list(range(today.year - 3, today.year + 2)), index=3)
+    gcv_kwh_per_m3 = st.number_input("GCV (kWh/m3)", min_value=1.0, max_value=20.0, value=10.55, step=0.01)
+    unit_filter = st.selectbox("Unit", ["mcm/day", "native ENTSOG unit"], index=0)
+    if st.button("Refresh ENTSOG data"):
         st.cache_data.clear()
 
     @st.cache_data(ttl=60 * 30)
-    def _load_entsog_bookings_cached(s: date, e: date, g: str, gcv: float):
-        return capacity.fetch_entsog_capacity_bookings(s, e, granularity=g, gcv_kwh_per_m3=gcv)
+    def _load_cross_border_year(y: int, unit_name: str, gcv: float):
+        preferred = "mcm/day" if unit_name == "mcm/day" else "native"
+        return capacity.fetch_entsog_cross_border_capacity_year(y, preferred_unit=preferred, gcv_kwh_per_m3=gcv)
 
-    bookings_df, bookings_quality = _load_entsog_bookings_cached(start_date, end_date, granularity, gcv_kwh_per_m3)
+    cap_year_df, cap_year_quality = _load_cross_border_year(selected_year, unit_filter, gcv_kwh_per_m3)
 
-    if bookings_df.empty:
-        st.warning("No Firm Booked data returned for this operator-point-direction and period.")
-        if bookings_quality.get("warnings"):
-            st.dataframe(pd.DataFrame({"warning": bookings_quality["warnings"]}), use_container_width=True, hide_index=True)
-    else:
-        operator_values = sorted(bookings_df["operatorLabel"].dropna().astype(str).unique().tolist())
-        point_values = sorted(bookings_df["pointLabel"].dropna().astype(str).unique().tolist())
-        direction_values = sorted(bookings_df["directionKey"].dropna().astype(str).unique().tolist())
-        selected_operators = st.multiselect("Selected TSO/operator", operator_values, default=operator_values)
-        selected_points = st.multiselect("Selected border point", point_values, default=point_values)
-        selected_directions = st.multiselect("Direction: entry/exit", direction_values, default=direction_values)
+    if cap_year_df.empty:
+        st.error("No ENTSOG cross-border capacity booking data returned for the selected year.")
+        if cap_year_quality.get("api_errors"):
+            st.dataframe(pd.DataFrame({"api_error": cap_year_quality["api_errors"]}), use_container_width=True, hide_index=True)
+        st.stop()
 
-        view = bookings_df[
-            bookings_df["operatorLabel"].isin(selected_operators)
-            & bookings_df["pointLabel"].isin(selected_points)
-            & bookings_df["directionKey"].isin(selected_directions)
-        ].copy()
-        view["series"] = view["operatorLabel"] + " | " + view["pointLabel"] + " | " + view["directionKey"]
-        st.caption(f"Selected period: {start_date.isoformat()} to {end_date.isoformat()} | Granularity: {granularity}")
+    point_values = sorted(cap_year_df["_canonical_label"].dropna().astype(str).unique().tolist())
+    country_pair_values = sorted(cap_year_df["country_pair"].dropna().astype(str).unique().tolist())
+    direction_values = sorted(cap_year_df["direction"].dropna().astype(str).unique().tolist())
+    product_values = ["all", "yearly", "quarterly", "monthly", "daily"]
 
-        fig = px.area(
-            view.sort_values("period"),
-            x="period",
-            y="converted_mcm_day",
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        selected_points = st.multiselect("Border point", point_values, default=point_values)
+    with f2:
+        selected_pairs = st.multiselect("Country pair", country_pair_values, default=country_pair_values)
+    with f3:
+        selected_directions = st.multiselect("Direction", direction_values, default=direction_values)
+    selected_product = st.radio("Auction product type", product_values, index=0, horizontal=True)
+
+    view = cap_year_df[
+        cap_year_df["_canonical_label"].isin(selected_points)
+        & cap_year_df["country_pair"].isin(selected_pairs)
+        & cap_year_df["direction"].isin(selected_directions)
+    ].copy()
+    if selected_product != "all":
+        view = view[view["auction_product_type"] == selected_product].copy()
+
+    # Summary cards
+    total_technical = pd.to_numeric(view.get("technical_capacity", pd.Series(dtype=float)), errors="coerce").sum(skipna=True)
+    total_booked = pd.to_numeric(view.get("booked_capacity", pd.Series(dtype=float)), errors="coerce").sum(skipna=True)
+    avg_booked_pct = pd.to_numeric(view.get("booked_pct_of_technical", pd.Series(dtype=float)), errors="coerce").mean(skipna=True)
+    active_points = view["_canonical_label"].nunique()
+    missing_warn = int((view["warning"].astype(str).str.len() > 0).sum())
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Total technical capacity", f"{total_technical:,.2f}")
+    k2.metric("Total booked capacity", f"{total_booked:,.2f}")
+    k3.metric("Average booked %", f"{avg_booked_pct:,.2f}%" if pd.notna(avg_booked_pct) else "n/a")
+    k4.metric("Active points", f"{active_points}")
+    k5.metric("Missing/warning rows", f"{missing_warn}")
+    st.caption(f"Displayed unit: {view['unit'].iloc[0] if not view.empty else 'n/a'}")
+
+    # Heat map: time vs point+direction+product, color booked %
+    heat = view.copy()
+    heat["axis_y"] = heat["_canonical_label"] + " | " + heat["direction"] + " | " + heat["auction_product_type"]
+    heat["period_label"] = heat["gas_day"].dt.strftime("%Y-%m-%d")
+    heat_fig = px.density_heatmap(
+        heat,
+        x="period_label",
+        y="axis_y",
+        z="booked_pct_of_technical",
+        color_continuous_scale="Blues",
+        title="Booked Capacity Heat Map (% of technical)",
+        labels={"period_label": "Time period", "axis_y": "Point | direction | product", "booked_pct_of_technical": "Booked %"},
+        hover_data={
+            "_canonical_label": True,
+            "direction": True,
+            "auction_product_type": True,
+            "technical_capacity": ":.4f",
+            "booked_capacity": ":.4f",
+            "booked_pct_of_technical": ":.2f",
+            "available_capacity": ":.4f",
+            "unit": True,
+        },
+    )
+    st.plotly_chart(heat_fig, use_container_width=True, config={"displayModeBar": False})
+
+    # Line/area by product
+    view["series"] = view["_canonical_label"] + " | " + view["direction"] + " | " + view["auction_product_type"]
+    product_modes = st.radio("Time chart mode", ["line", "stacked area"], horizontal=True)
+    if product_modes == "stacked area":
+        ts_fig = px.area(
+            view.sort_values("gas_day"),
+            x="gas_day",
+            y="booked_capacity",
             color="series",
-            title="Booked Capacity (converted to mcm/day)",
-            labels={"period": "Date / Period", "converted_mcm_day": "mcm/day"},
+            title="Booked Capacity Over Time (by point and product)",
         )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-        table_cols = [
-            "period",
-            "operatorLabel",
-            "pointLabel",
-            "directionKey",
-            "pointDirection",
-            "indicator",
-            "periodType",
-            "value",
-            "original_unit",
-            "converted_mcm_day",
-            "lastUpdateDateTime",
-            "conversion_status",
-        ]
-        st.markdown("### Capacity booking table")
-        st.dataframe(view[table_cols], use_container_width=True, hide_index=True)
-        st.download_button(
-            "Download capacity booking data (CSV)",
-            data=view[table_cols].to_csv(index=False).encode("utf-8"),
-            file_name="entsog_firm_booked_capacity.csv",
-            mime="text/csv",
+    else:
+        ts_fig = px.line(
+            view.sort_values("gas_day"),
+            x="gas_day",
+            y="booked_capacity",
+            color="series",
+            title="Booked Capacity Over Time (by point and product)",
         )
+    st.plotly_chart(ts_fig, use_container_width=True, config={"displayModeBar": False})
 
-    st.markdown("### Data quality")
-    dq_rows = [
-        {"metric": "number of API calls", "value": bookings_quality.get("api_calls", 0)},
-        {"metric": "number of records fetched", "value": bookings_quality.get("records_fetched", 0)},
-        {"metric": "date range fetched", "value": bookings_quality.get("date_range_fetched", "")},
-        {"metric": "operators included", "value": ", ".join(bookings_quality.get("operators_included", []))},
-        {"metric": "points included", "value": ", ".join(bookings_quality.get("points_included", []))},
-        {"metric": "empty responses", "value": bookings_quality.get("empty_responses", 0)},
-        {"metric": "failed calls", "value": bookings_quality.get("failed_calls", 0)},
-        {"metric": "unit conversion assumptions", "value": bookings_quality.get("unit_conversion_assumptions", "")},
-        {"metric": "latest lastUpdateDateTime", "value": bookings_quality.get("latest_lastUpdateDateTime", "")},
+    # Regional map
+    map_points = {
+        "Kiskundorozsma-2 (HU) / Horgos (RS)": {"lat": 46.18, "lon": 19.98, "route": "HU>RS"},
+        "Kiskundorozsma (HU > RS)": {"lat": 46.22, "lon": 19.97, "route": "HU>RS"},
+        "Kalotina (BG) / Dimitrovgrad (RS)": {"lat": 43.04, "lon": 22.89, "route": "BG>RS"},
+        "Kireevo/Kirevo (BG) / Zajecar (RS)": {"lat": 43.77, "lon": 22.22, "route": "BG>RS"},
+    }
+    latest_by_point = (
+        view.sort_values("gas_day")
+        .groupby("_canonical_label", as_index=False)
+        .tail(1)
+    )
+    map_rows = []
+    for _, r in latest_by_point.iterrows():
+        key = r["_canonical_label"]
+        if key not in map_points:
+            continue
+        geo = map_points[key]
+        map_rows.append(
+            {
+                "point": key,
+                "lat": geo["lat"],
+                "lon": geo["lon"],
+                "route": geo["route"],
+                "direction": r["direction"],
+                "technical_capacity": r.get("technical_capacity"),
+                "booked_capacity": r.get("booked_capacity"),
+                "booked_pct": r.get("booked_pct_of_technical"),
+            }
+        )
+    map_df = pd.DataFrame(map_rows)
+    if not map_df.empty:
+        mfig = px.scatter_geo(
+            map_df,
+            lat="lat",
+            lon="lon",
+            color="route",
+            symbol="route",
+            scope="europe",
+            hover_name="point",
+            hover_data={
+                "route": True,
+                "direction": True,
+                "technical_capacity": ":.4f",
+                "booked_capacity": ":.4f",
+                "booked_pct": ":.2f",
+            },
+            title="Regional Cross-Border Points (Serbia-Hungary-Bulgaria)",
+        )
+        # pipeline-style links
+        line_color = "#2E4F7F"
+        mfig.add_trace(
+            go.Scattergeo(
+                lon=[19.97, 20.46, None, 22.89, 21.90, None, 22.22, 21.90],
+                lat=[46.22, 45.27, None, 43.04, 43.32, None, 43.77, 43.32],
+                mode="lines",
+                line=dict(width=2, color=line_color),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+        mfig.update_geos(
+            lataxis_range=[41.5, 47.8],
+            lonaxis_range=[17.5, 25.5],
+            showcountries=True,
+            countrycolor="rgba(80,80,80,0.5)",
+            showland=True,
+            landcolor="rgb(242,245,250)",
+        )
+        st.plotly_chart(mfig, use_container_width=True, config={"displayModeBar": False})
+
+    st.markdown("### Capacity booking table")
+    table_cols = [
+        "date_from",
+        "date_to",
+        "gas_day",
+        "country_from",
+        "country_to",
+        "TSO",
+        "TSO_code",
+        "interconnection_point_name",
+        "interconnection_point_code",
+        "direction",
+        "auction_product_type",
+        "technical_capacity",
+        "offered_capacity",
+        "booked_capacity",
+        "available_capacity",
+        "unit",
+        "source_url",
+        "query_metadata",
+        "warning",
     ]
-    st.dataframe(pd.DataFrame(dq_rows), use_container_width=True, hide_index=True)
-    if bookings_quality.get("warnings"):
-        st.warning("Warnings were detected for some pointDirection combinations.")
-        st.dataframe(pd.DataFrame({"warning": bookings_quality["warnings"]}), use_container_width=True, hide_index=True)
+    present_cols = [c for c in table_cols if c in view.columns]
+    st.dataframe(view[present_cols], use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "Download ENTSOG capacity table (CSV)",
+        data=view[present_cols].to_csv(index=False).encode("utf-8"),
+        file_name=f"entsog_cross_border_capacity_{selected_year}.csv",
+        mime="text/csv",
+    )
+
+    st.markdown("### Debug / Data quality panel")
+    dq_items = [
+        {"metric": "last successful fetch", "value": cap_year_quality.get("last_successful_fetch", "")},
+        {"metric": "records fetched", "value": cap_year_quality.get("records_fetched", 0)},
+        {"metric": "missing points", "value": ", ".join(cap_year_quality.get("missing_points", []))},
+        {"metric": "missing products", "value": " | ".join(cap_year_quality.get("missing_products", []))},
+        {"metric": "api errors", "value": len(cap_year_quality.get("api_errors", []))},
+        {"metric": "matched pointDirections", "value": ", ".join(cap_year_quality.get("matched_point_directions", []))},
+    ]
+    st.dataframe(pd.DataFrame(dq_items), use_container_width=True, hide_index=True)
+    if cap_year_quality.get("api_errors"):
+        st.warning("API errors occurred during ENTSOG fetch.")
+        st.dataframe(pd.DataFrame({"api_error": cap_year_quality["api_errors"]}), use_container_width=True, hide_index=True)
+    if cap_year_quality.get("data_warnings"):
+        st.warning("Data warnings were detected.")
+        st.dataframe(pd.DataFrame({"warning": cap_year_quality["data_warnings"]}), use_container_width=True, hide_index=True)
+    with st.expander("Query URLs used", expanded=False):
+        urls = cap_year_quality.get("query_urls", [])
+        st.dataframe(pd.DataFrame({"url": urls}), use_container_width=True, hide_index=True)
 
 
 # =============================================================================
